@@ -1,0 +1,3 @@
+[console_scripts]
+readji-tts-voice-design = readji_tts.voice_design:main
+readji-tts-worker = readji_tts.worker:main

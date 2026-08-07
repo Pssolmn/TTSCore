@@ -1,0 +1,71 @@
+# Readji TTS Worker
+
+This is the production Python worker for Readji's Tier 0 novel narration. It claims one job at a time from `tts_jobs`, synthesizes every `NovelBlock` with VoxCPM2, concatenates the audio with ffmpeg, uploads an immutable MP3 to Cloudflare R2, and commits block timestamps only if the episode has not changed.
+
+## Prerequisites
+
+- Windows with NVIDIA driver and CUDA-capable GPU (the current RTX 4060 runs one sequential worker)
+- Python 3.10–3.12, ffmpeg available in `PATH`
+- Running PostgreSQL from `Novel Platform/docker-compose.yml`
+- Cloudflare R2 credentials with object read/write permission for the Readji media bucket
+
+## Install
+
+```powershell
+cd "C:\Users\SEESO\Documents\Web dev\TTSCore"
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -e ".[dev]"
+Copy-Item .env.example .env
+```
+
+For the current local Phase A setup, the worker automatically reads the existing `Novel Platform/apps/api/.env` if `TTSCore/.env` does not exist, so database/R2 secrets are not duplicated. Production deployments should provide a dedicated `.env` (or `TTS_ENV_FILE`).
+
+## Reader voice slots
+
+Every approved chapter is rendered three times for the fixed reader-facing slots `old_male` (ชายแก่), `young_male` (หนุ่มน้อย), and `female` (คุณผู้หญิง). The source WAV mapping is stored locally in [`config/voice-slots.json`](config/voice-slots.json), not in the web application or database. To replace a voice, place the legally usable WAV on the generator machine and update that slot's `reference_wav_path` before queuing new renders. Leave the JSON `version` as `v1` for source-only changes; every render has a unique job ID in its R2 key, so it is safe to replace a source without changing reader slot names or releasing the frontend.
+
+The local initial mapping uses the real candidate files already present on this machine: `warm-male.wav` for ชายแก่, `neutral.wav` for หนุ่มน้อย, and `warm-female.wav` for คุณผู้หญิง. Replace these only after listening/reviewing the desired source voice.
+
+## Novel text handling
+
+Before inference, the worker keeps Thai, English, digits, and narration punctuation only; other scripts become spaces so words never join together. A line made only of `*` characters becomes a 1.25-second scene-break silence. Ellipses (`...` and `…`) become 0.55-second silence between the surrounding phrases. Both pauses are written as WAVs and included in block timestamps, so the reader highlighter and click-to-seek remain in sync with the final MP3.
+
+## Create voice candidates
+
+```powershell
+readji-tts-voice-design
+```
+
+The command writes Thai narration candidates into `assets/voice-candidates`. Listen to them and map the approved, legally usable files to the three slots in `config/voice-slots.json`. `TTS_MASTER_VOICE_PATH` remains only for legacy voice-design tooling; normal reader jobs use the slot file.
+
+## Run
+
+```powershell
+readji-tts-worker
+```
+
+The first run downloads `openbmb/VoxCPM2`. A worker does not process any job without a master voice, GPU, database connection, R2 configuration, or ffmpeg; it fails fast instead of publishing partial audio.
+
+## Operating guarantees
+
+- Job claiming uses `FOR UPDATE SKIP LOCKED`, a worker ID, and an expiring lease.
+- Failed jobs are classified by code/stage, recorded in the append-only `tts_job_events` log, and retry with backoff (15s, 30s, 60s) up to `max_attempts`; then become `failed`. Expired final leases are failed instead of remaining stuck in `processing`.
+- Admin can cancel a queued/processing request safely or retry only its failed/cancelled voice jobs after a configuration problem is fixed. Every manual action is audited and recorded as an event.
+- `tts_job_blocks` stores the durable block ID, source-text hash, render status, duration, and final timestamp for every attempt. This is the backend foundation for a later repair-one-chunk editor; it does not yet expose a new editor screen.
+- A hash of canonical content is checked immediately before timestamps and status are committed. Editing an episode while it is rendering never overwrites the edited revision.
+- Before the GPU is loaded, the worker counts the actual temporary audio blocks it would emit (spoken chunks plus intentional silences). A job that would exceed the hard 500-block ceiling is failed once with `OUTPUT_BLOCK_LIMIT_EXCEEDED`; it creates no workspace files, does not call the model, and is never retried automatically. `TTS_MAX_OUTPUT_BLOCKS` may lower this ceiling for maintenance, but cannot raise it above 500.
+- Each output key is unique to the episode, voice slot, profile version, job, and attempt: `episode-audio/{episode-id}/{slot}/{version}/job-{job-id}/attempt-{attempt}/full.mp3`, so an immutable CDN cache can never serve an older retry as a new revision.
+- Rendering is deliberately sequential per GPU. Run another worker only on a separate GPU-equipped machine.
+
+## Current local installation
+
+The local GPU machine is already configured with Python 3.11, CUDA 12.8, VoxCPM2 weights, the neutral master narrator, PostgreSQL/R2 connectivity, and a `ReadjiTtsWorker` Windows Scheduled Task. Its durable log is `runtime/worker.log`. Do not run a second copy of the worker on this same GPU.
+
+Before a public deployment, rotate the existing development database/R2 secrets (see `Novel Platform/KNOWN_ISSUES.md`) and supply those new values through a dedicated worker environment file when the worker is moved off this machine.
+
+## End-to-end smoke test
+
+`python scripts/integration-smoke-test.py` creates a uniquely named private test work and two short Thai blocks, waits for the already-running worker to render/upload/commit them, validates the R2 object and timestamps, then deletes the test work, job, and R2 object. It never targets an existing work.

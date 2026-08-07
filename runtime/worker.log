@@ -1,0 +1,64 @@
+2026-08-07 05:43:01,127 INFO readji_tts loading_model model=openbmb/VoxCPM2
+2026-08-07 05:43:04,085 INFO httpx HTTP Request: GET https://huggingface.co/api/models/openbmb/VoxCPM2/revision/main "HTTP/1.1 200 OK"
+2026-08-07 05:43:27,829 INFO readji_tts model_ready sample_rate=48000
+2026-08-07 05:43:27,831 INFO readji_tts job_started id=1 episode=382 attempt=1
+2026-08-07 05:44:00,581 INFO readji_tts job_completed id=1 episode=382 duration=7.840
+2026-08-07 05:50:35,829 INFO readji_tts job_started id=2 episode=199 attempt=1
+2026-08-07 08:25:35,075 INFO readji_tts loading_model model=openbmb/VoxCPM2
+2026-08-07 08:25:38,137 INFO httpx HTTP Request: GET https://huggingface.co/api/models/openbmb/VoxCPM2/revision/main "HTTP/1.1 200 OK"
+2026-08-07 08:26:06,461 INFO readji_tts model_ready sample_rate=48000
+2026-08-07 08:26:06,467 INFO readji_tts job_started id=3 episode=17 attempt=1
+2026-08-07 08:26:15,539 INFO readji_tts job_progress id=3 completed_blocks=1 total_blocks=53
+2026-08-07 08:26:26,901 INFO readji_tts job_progress id=3 completed_blocks=2 total_blocks=53
+2026-08-07 08:26:34,953 INFO readji_tts job_progress id=3 completed_blocks=3 total_blocks=53
+2026-08-07 08:26:49,546 INFO readji_tts job_progress id=3 completed_blocks=4 total_blocks=53
+2026-08-07 08:26:55,258 INFO readji_tts job_progress id=3 completed_blocks=5 total_blocks=53
+2026-08-07 08:26:58,927 INFO readji_tts job_progress id=3 completed_blocks=6 total_blocks=53
+2026-08-07 08:27:13,247 INFO readji_tts job_progress id=3 completed_blocks=7 total_blocks=53
+2026-08-07 08:27:22,096 INFO readji_tts job_progress id=3 completed_blocks=8 total_blocks=53
+2026-08-07 08:27:29,786 INFO readji_tts job_progress id=3 completed_blocks=9 total_blocks=53
+2026-08-07 08:27:33,941 INFO readji_tts job_progress id=3 completed_blocks=10 total_blocks=53
+2026-08-07 08:27:45,149 INFO readji_tts job_progress id=3 completed_blocks=11 total_blocks=53
+2026-08-07 08:27:50,729 INFO readji_tts job_progress id=3 completed_blocks=12 total_blocks=53
+2026-08-07 08:27:55,548 INFO readji_tts job_progress id=3 completed_blocks=13 total_blocks=53
+2026-08-07 08:27:57,352 INFO readji_tts job_progress id=3 completed_blocks=14 total_blocks=53
+2026-08-07 08:28:01,441 INFO readji_tts job_progress id=3 completed_blocks=15 total_blocks=53
+2026-08-07 08:28:08,063 INFO readji_tts job_progress id=3 completed_blocks=16 total_blocks=53
+2026-08-07 08:28:15,103 INFO readji_tts job_progress id=3 completed_blocks=17 total_blocks=53
+2026-08-07 08:28:24,729 INFO readji_tts job_progress id=3 completed_blocks=18 total_blocks=53
+2026-08-07 08:28:40,768 INFO readji_tts job_progress id=3 completed_blocks=19 total_blocks=53
+2026-08-07 08:28:43,606 INFO readji_tts job_progress id=3 completed_blocks=20 total_blocks=53
+2026-08-07 08:28:48,273 INFO readji_tts job_progress id=3 completed_blocks=21 total_blocks=53
+2026-08-07 08:28:54,146 INFO readji_tts job_progress id=3 completed_blocks=22 total_blocks=53
+2026-08-07 08:29:02,488 INFO readji_tts job_progress id=3 completed_blocks=23 total_blocks=53
+2026-08-07 08:29:04,263 INFO readji_tts job_progress id=3 completed_blocks=24 total_blocks=53
+2026-08-07 08:29:13,728 INFO readji_tts job_progress id=3 completed_blocks=25 total_blocks=53
+2026-08-07 08:29:15,919 INFO readji_tts job_progress id=3 completed_blocks=26 total_blocks=53
+2026-08-07 08:29:24,407 INFO readji_tts job_progress id=3 completed_blocks=27 total_blocks=53
+2026-08-07 08:29:31,580 INFO readji_tts job_progress id=3 completed_blocks=28 total_blocks=53
+2026-08-07 08:29:38,367 INFO readji_tts job_progress id=3 completed_blocks=29 total_blocks=53
+2026-08-07 08:29:42,879 INFO readji_tts job_progress id=3 completed_blocks=30 total_blocks=53
+2026-08-07 08:29:50,521 INFO readji_tts job_progress id=3 completed_blocks=31 total_blocks=53
+2026-08-07 08:29:57,693 INFO readji_tts job_progress id=3 completed_blocks=32 total_blocks=53
+2026-08-07 08:30:04,322 INFO readji_tts job_progress id=3 completed_blocks=33 total_blocks=53
+2026-08-07 08:30:09,903 INFO readji_tts job_progress id=3 completed_blocks=34 total_blocks=53
+2026-08-07 08:30:18,809 INFO readji_tts job_progress id=3 completed_blocks=35 total_blocks=53
+2026-08-07 08:30:21,527 INFO readji_tts job_progress id=3 completed_blocks=36 total_blocks=53
+2026-08-07 08:30:26,963 INFO readji_tts job_progress id=3 completed_blocks=37 total_blocks=53
+2026-08-07 08:30:34,386 INFO readji_tts job_progress id=3 completed_blocks=38 total_blocks=53
+2026-08-07 08:30:41,163 INFO readji_tts job_progress id=3 completed_blocks=39 total_blocks=53
+2026-08-07 08:30:44,625 INFO readji_tts job_progress id=3 completed_blocks=40 total_blocks=53
+2026-08-07 08:30:49,889 INFO readji_tts job_progress id=3 completed_blocks=41 total_blocks=53
+2026-08-07 08:30:57,850 INFO readji_tts job_progress id=3 completed_blocks=42 total_blocks=53
+2026-08-07 08:31:12,465 INFO readji_tts job_progress id=3 completed_blocks=43 total_blocks=53
+2026-08-07 08:31:23,237 INFO readji_tts job_progress id=3 completed_blocks=44 total_blocks=53
+2026-08-07 08:31:29,046 INFO readji_tts job_progress id=3 completed_blocks=45 total_blocks=53
+2026-08-07 08:31:33,015 INFO readji_tts job_progress id=3 completed_blocks=46 total_blocks=53
+2026-08-07 08:31:37,322 INFO readji_tts job_progress id=3 completed_blocks=47 total_blocks=53
+2026-08-07 08:31:40,895 INFO readji_tts job_progress id=3 completed_blocks=48 total_blocks=53
+2026-08-07 08:31:51,147 INFO readji_tts job_progress id=3 completed_blocks=49 total_blocks=53
+2026-08-07 08:31:53,709 INFO readji_tts job_progress id=3 completed_blocks=50 total_blocks=53
+2026-08-07 08:32:06,218 INFO readji_tts job_progress id=3 completed_blocks=51 total_blocks=53
+2026-08-07 08:32:16,932 INFO readji_tts job_progress id=3 completed_blocks=52 total_blocks=53
+2026-08-07 08:32:20,071 INFO readji_tts job_progress id=3 completed_blocks=53 total_blocks=53
+2026-08-07 08:32:22,957 INFO readji_tts job_completed id=3 episode=17 duration=265.120

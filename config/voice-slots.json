@@ -1,0 +1,20 @@
+{
+  "version": "v1",
+  "voices": [
+    {
+      "slot": "old_male",
+      "label": "ชายแก่",
+      "reference_wav_path": "../assets/voice-candidates/warm-male.wav"
+    },
+    {
+      "slot": "young_male",
+      "label": "หนุ่มน้อย",
+      "reference_wav_path": "../assets/voice-candidates/neutral.wav"
+    },
+    {
+      "slot": "female",
+      "label": "คุณผู้หญิง",
+      "reference_wav_path": "../assets/voice-candidates/warm-female.wav"
+    }
+  ]
+}

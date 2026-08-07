@@ -1,0 +1,3 @@
+{"event": "queued", "job_id": 1, "work_id": 109}
+{"event": "passed", "job_id": 1, "duration_seconds": 7.84}
+{"event": "cleanup_complete", "work_id": 109}

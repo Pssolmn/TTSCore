@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "readji-tts-worker"
+version = "0.1.0"
+description = "Production TTS worker for Readji novel episodes"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "boto3>=1.35,<2",
+  "numpy>=1.26,<3",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic-settings>=2.6,<3",
+  "soundfile>=0.12,<1",
+  "voxcpm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+readji-tts-worker = "readji_tts.worker:main"
+readji-tts-voice-design = "readji_tts.voice_design:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
