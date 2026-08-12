@@ -38,6 +38,12 @@ class ClaimedJob:
     attempt_count: int
     max_attempts: int
     blocks: list[NovelBlock]
+    # Display-only enrichment for the GUI's status line/log. None when the
+    # LEFT JOIN in claim_next() finds nothing or is skipped after a failure —
+    # callers must treat these as optional and omit them gracefully.
+    work_title: str | None = None
+    ep_name: str | None = None
+    ep_no: int | None = None
 
 
 @dataclass(frozen=True)

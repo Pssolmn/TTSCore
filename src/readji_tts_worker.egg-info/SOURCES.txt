@@ -4,6 +4,8 @@ src/readji_tts/__init__.py
 src/readji_tts/audio.py
 src/readji_tts/config.py
 src/readji_tts/db.py
+src/readji_tts/gui.py
+src/readji_tts/instance_lock.py
 src/readji_tts/provider.py
 src/readji_tts/r2.py
 src/readji_tts/schemas.py

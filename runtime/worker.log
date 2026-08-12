@@ -62,3 +62,25 @@
 2026-08-07 08:32:16,932 INFO readji_tts job_progress id=3 completed_blocks=52 total_blocks=53
 2026-08-07 08:32:20,071 INFO readji_tts job_progress id=3 completed_blocks=53 total_blocks=53
 2026-08-07 08:32:22,957 INFO readji_tts job_completed id=3 episode=17 duration=265.120
+2026-08-12 03:54:08,950 INFO readji_tts shutdown_requested
+2026-08-12 04:00:37,386 INFO readji_tts shutdown_requested
+2026-08-12 04:32:50,984 INFO readji_tts shutdown_requested
+2026-08-12 08:28:15,280 WARNING readji_tts voice_variant_skipped_file category=M_test file=badname.wav
+2026-08-12 08:31:43,567 WARNING readji_tts voice_variant_skipped_file category=M_test file=badname.wav
+2026-08-12 08:36:21,745 INFO readji_tts voice_profile_refreshed slots=female, old_male, young_male
+2026-08-12 08:36:21,746 WARNING readji_tts voice_variant_skipped_file category=M_test file=badname.wav
+2026-08-12 08:37:30,400 INFO readji_tts shutdown_requested
+2026-08-12 09:06:40,428 INFO readji_tts voice_profile_refreshed slots=female, old_male, young_male
+2026-08-12 09:06:54,473 INFO readji_tts voice_profile_refreshed slots=female, old_male, young_male
+2026-08-12 10:05:23,184 WARNING readji_tts voice_variant_skipped_file category=Basic file=female.wav
+2026-08-12 10:05:23,184 WARNING readji_tts voice_variant_skipped_file category=Basic file=old_male.wav
+2026-08-12 10:05:23,184 WARNING readji_tts voice_variant_skipped_file category=Basic file=young_male.wav
+2026-08-12 10:08:17,190 INFO readji_tts voice_profile_refreshed slots=female, old_male, young_male
+2026-08-12 10:08:17,191 WARNING readji_tts voice_variant_skipped_file category=Basic file=female.wav
+2026-08-12 10:08:17,191 WARNING readji_tts voice_variant_skipped_file category=Basic file=old_male.wav
+2026-08-12 10:08:17,191 WARNING readji_tts voice_variant_skipped_file category=Basic file=young_male.wav
+2026-08-12 10:10:01,737 INFO readji_tts shutdown_requested
+2026-08-12 10:28:19,911 WARNING readji_tts voice_variant_skipped_file category=Basic file=female.wav
+2026-08-12 10:28:19,912 WARNING readji_tts voice_variant_skipped_file category=Basic file=old_male.wav
+2026-08-12 10:28:19,912 WARNING readji_tts voice_variant_skipped_file category=Basic file=young_male.wav
+2026-08-12 12:09:17,504 INFO readji_tts shutdown_requested

@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 from pathlib import Path
 import os
 import shutil
 import socket
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 VOICE_SLOT_IDS = ("old_male", "young_male", "female")
+
+BASIC_VOICE_FOLDER_NAME = "Basic"
+
+_BASIC_VOICE_LABELS: dict[str, str] = {
+    "old_male": "ชายแก่",
+    "young_male": "หนุ่มน้อย",
+    "female": "คุณผู้หญิง",
+}
 
 
 @dataclass(frozen=True)
@@ -33,7 +41,11 @@ class Settings(BaseSettings):
     r2_public_url: str = Field(alias="R2_PUBLIC_URL")
 
     master_voice_path: Path = Field(default=Path("assets/master-voice/readji-narrator.wav"), alias="TTS_MASTER_VOICE_PATH")
-    voice_slots_path: Path = Field(default=Path("config/voice-slots.json"), alias="TTS_VOICE_SLOTS_PATH")
+    # Root folder for both the Basic-tier render voices (see BASIC_VOICE_FOLDER_NAME
+    # subfolder, read on every render via load_basic_voice_profiles) and the
+    # dynamic per-character voice-variant scan (Settings dialog's "Variant Tray").
+    # See voice_variants.py.
+    voice_variants_path: Path = Field(default=Path("assets/voices"), alias="TTS_VOICE_VARIANTS_PATH")
     model_id: str = Field(default="openbmb/VoxCPM2", alias="TTS_MODEL_ID")
     device: str = Field(default="cuda", alias="TTS_DEVICE")
     load_denoiser: bool = Field(default=False, alias="TTS_LOAD_DENOISER")
@@ -63,8 +75,17 @@ class Settings(BaseSettings):
     def trim_public_url(cls, value: str) -> str:
         return value.rstrip("/")
 
+    @property
+    def voice_basic_path(self) -> Path:
+        return self.voice_variants_path / BASIC_VOICE_FOLDER_NAME
 
-def load_settings(*, require_master_voice: bool = False) -> Settings:
+
+def resolve_env_file() -> Path:
+    """Resolve which .env file load_settings() will read, without loading it.
+
+    The GUI's read-only Settings view needs this exact same fallback so what
+    it shows/opens always matches what the running process actually loaded.
+    """
     configured_env_file = os.environ.get("TTS_ENV_FILE")
     local_env_file = Path(configured_env_file) if configured_env_file else Path(".env")
     # During the current Phase A setup the worker shares a private machine with
@@ -72,6 +93,20 @@ def load_settings(*, require_master_voice: bool = False) -> Settings:
     # A dedicated TTS_ENV_FILE or local .env always takes precedence for deploys.
     if not local_env_file.is_file() and not configured_env_file:
         local_env_file = Path(__file__).resolve().parents[3] / "Novel Platform" / "apps" / "api" / ".env"
+    return local_env_file
+
+
+def describe_database_target(database_url: str) -> str:
+    """Return the DB target with credentials stripped, safe to display in the GUI."""
+    parsed = urlsplit(database_url)
+    host = parsed.hostname or "unknown-host"
+    port = f":{parsed.port}" if parsed.port else ""
+    database = parsed.path.lstrip("/") or "unknown-db"
+    return f"{parsed.scheme}://{host}{port}/{database}"
+
+
+def load_settings(*, require_master_voice: bool = False) -> Settings:
+    local_env_file = resolve_env_file()
     settings = Settings(_env_file=local_env_file)
     configured_ffmpeg = Path(settings.ffmpeg_path)
     candidates = [
@@ -93,42 +128,27 @@ def load_settings(*, require_master_voice: bool = False) -> Settings:
     return settings
 
 
-def load_voice_profiles(settings: Settings) -> dict[str, VoiceProfile]:
-    """Load the local, editable mapping from stable product slot to source WAV.
+def load_basic_voice_profiles(basic_dir: Path) -> dict[str, VoiceProfile]:
+    """Load the fixed 3-slot Basic-tier render voices from a real folder on disk.
 
-    The database stores only a slot/version snapshot.  Changing a reference WAV
-    is therefore a deliberate TTS-machine operation, not a reader API change.
+    Basic tier always renders a single narrator voice; the file for each slot
+    lives at ``{basic_dir}/{slot}.wav``. version is hardcoded to "v1" here: it
+    is a cross-repo contract with apps/api's TTS_VOICE_PROFILE_VERSION, and a
+    mismatch fails every render job's version check.
     """
-    config_path = settings.voice_slots_path.resolve()
-    if not config_path.is_file():
-        raise RuntimeError(f"TTS voice-slot configuration is missing: {config_path}")
-    try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"TTS voice-slot configuration is invalid JSON: {config_path}") from error
-
-    version = raw.get("version")
-    voices = raw.get("voices")
-    if not isinstance(version, str) or not version.strip() or not isinstance(voices, list):
-        raise RuntimeError("TTS voice-slot configuration must contain a version and voices array")
+    resolved_dir = basic_dir.resolve()
+    if not resolved_dir.is_dir():
+        raise RuntimeError(f"Basic voice folder is missing: {resolved_dir}")
 
     profiles: dict[str, VoiceProfile] = {}
-    for item in voices:
-        if not isinstance(item, dict):
-            raise RuntimeError("Every TTS voice-slot entry must be an object")
-        slot = item.get("slot")
-        label = item.get("label")
-        source = item.get("reference_wav_path")
-        if slot not in VOICE_SLOT_IDS or not isinstance(label, str) or not label.strip() or not isinstance(source, str):
-            raise RuntimeError("TTS voice-slot entries require a supported slot, label, and reference_wav_path")
-        if slot in profiles:
-            raise RuntimeError(f"TTS voice slot is configured more than once: {slot}")
-        reference_wav_path = (config_path.parent / source).resolve()
+    for slot in VOICE_SLOT_IDS:
+        reference_wav_path = resolved_dir / f"{slot}.wav"
         if not reference_wav_path.is_file():
             raise RuntimeError(f"Reference WAV for TTS voice slot {slot} is missing: {reference_wav_path}")
-        profiles[slot] = VoiceProfile(slot=slot, label=label.strip(), version=version.strip(), reference_wav_path=reference_wav_path)
-
-    missing = set(VOICE_SLOT_IDS) - set(profiles)
-    if missing:
-        raise RuntimeError(f"TTS voice-slot configuration is missing required slots: {', '.join(sorted(missing))}")
+        profiles[slot] = VoiceProfile(
+            slot=slot,
+            label=_BASIC_VOICE_LABELS.get(slot, slot),
+            version="v1",
+            reference_wav_path=reference_wav_path,
+        )
     return profiles

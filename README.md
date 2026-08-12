@@ -23,11 +23,11 @@ Copy-Item .env.example .env
 
 For the current local Phase A setup, the worker automatically reads the existing `Novel Platform/apps/api/.env` if `TTSCore/.env` does not exist, so database/R2 secrets are not duplicated. Production deployments should provide a dedicated `.env` (or `TTS_ENV_FILE`).
 
-## Reader voice slots
+## Reader voice slots (Basic tier)
 
-Every approved chapter is rendered three times for the fixed reader-facing slots `old_male` (ชายแก่), `young_male` (หนุ่มน้อย), and `female` (คุณผู้หญิง). The source WAV mapping is stored locally in [`config/voice-slots.json`](config/voice-slots.json), not in the web application or database. To replace a voice, place the legally usable WAV on the generator machine and update that slot's `reference_wav_path` before queuing new renders. Leave the JSON `version` as `v1` for source-only changes; every render has a unique job ID in its R2 key, so it is safe to replace a source without changing reader slot names or releasing the frontend.
+Basic-tier chapters are always rendered with a single narrator voice, one of three fixed reader-facing slots: `old_male` (ชายแก่), `young_male` (หนุ่มน้อย), and `female` (คุณผู้หญิง). The source WAV for each slot is a real file on disk at `assets/voices/Basic/<slot>.wav` -- there is no config file to edit. To replace a voice, place the legally usable WAV directly at that path before queuing new renders. The profile version is hardcoded to `v1` in `load_basic_voice_profiles()`; every render has a unique job ID in its R2 key, so it is safe to replace a source file without changing reader slot names or releasing the frontend.
 
-The local initial mapping uses the real candidate files already present on this machine: `warm-male.wav` for ชายแก่, `neutral.wav` for หนุ่มน้อย, and `warm-female.wav` for คุณผู้หญิง. Replace these only after listening/reviewing the desired source voice.
+The current files are the real candidate voices already reviewed on this machine: `assets/voices/Basic/old_male.wav` (ชายแก่), `assets/voices/Basic/young_male.wav` (หนุ่มน้อย), and `assets/voices/Basic/female.wav` (คุณผู้หญิง).
 
 ## Novel text handling
 
@@ -39,7 +39,7 @@ Before inference, the worker keeps Thai, English, digits, and narration punctuat
 readji-tts-voice-design
 ```
 
-The command writes Thai narration candidates into `assets/voice-candidates`. Listen to them and map the approved, legally usable files to the three slots in `config/voice-slots.json`. `TTS_MASTER_VOICE_PATH` remains only for legacy voice-design tooling; normal reader jobs use the slot file.
+The command writes Thai narration candidates into `assets/voice-candidates`. Listen to them and copy the approved, legally usable file to the matching slot at `assets/voices/Basic/<slot>.wav`. `TTS_MASTER_VOICE_PATH` remains only for legacy voice-design tooling; normal reader jobs use the Basic slot files.
 
 ## Run
 

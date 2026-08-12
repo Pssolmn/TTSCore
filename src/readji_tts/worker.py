@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 import shutil
@@ -21,14 +23,28 @@ from .audio import (
     write_silence_wav,
     write_wav,
 )
-from .config import Settings, VoiceProfile, load_settings, load_voice_profiles
+from .config import Settings, VoiceProfile, load_basic_voice_profiles, load_settings
 from .db import JobRepository
+from .instance_lock import acquire_single_instance_lock
 from .provider import VoxCpmNarrator
 from .r2 import R2Storage
 from .schemas import ClaimedJob
 
 
 LOGGER = logging.getLogger("readji_tts")
+
+
+@dataclass
+class WorkerEvents:
+    """Optional GUI hooks. Every field defaults to None, so a Worker built
+    without `events=` (the headless `readji-tts-worker` entry point) behaves
+    identically to before this existed."""
+
+    on_activity: Callable[[], None] | None = None
+    on_progress: Callable[[int, int, int, int | None], None] | None = None
+    on_job_started: Callable[[ClaimedJob], None] | None = None
+    on_job_completed: Callable[[int, float], None] | None = None
+    on_job_failed: Callable[[int, str, str], None] | None = None
 
 
 def classify_failure(error: Exception) -> tuple[str, str, bool]:
@@ -66,16 +82,28 @@ def configure_logging(log_file: Path) -> None:
 
 
 class Worker:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, events: WorkerEvents | None = None) -> None:
+        # First statement, before the DB/R2 connections are even opened: if
+        # another copy already holds this GPU, fail immediately with nothing
+        # else left to tear down.
+        self._lock = acquire_single_instance_lock(settings.work_dir / "worker.lock")
         self.settings = settings
-        self.repository = JobRepository(settings.database_url, settings.worker_id, settings.lease_seconds)
+        self.events = events
+        self.repository = JobRepository(
+            settings.database_url,
+            settings.worker_id,
+            settings.lease_seconds,
+            on_activity=events.on_activity if events else None,
+            on_progress=events.on_progress if events else None,
+        )
         self.storage = R2Storage(settings)
-        self.voice_profiles = load_voice_profiles(settings)
+        self.voice_profiles = load_basic_voice_profiles(settings.voice_basic_path)
         self.narrator: VoxCpmNarrator | None = None
         self.running = True
 
     def close(self) -> None:
         self.repository.close()
+        self._lock.release()
 
     def stop(self, *_: object) -> None:
         LOGGER.info("shutdown_requested")
@@ -158,7 +186,13 @@ class Worker:
             self.repository.prepare_block_manifest(job)
             narrator = self.get_narrator()
             voice = self.get_voice_profile(job)
-            LOGGER.info("job_started id=%s episode=%s slot=%s version=%s attempt=%s", job.id, job.ep_id, job.voice_slot, job.voice_profile_version, job.attempt_count)
+            LOGGER.info(
+                "job_started id=%s episode=%s slot=%s version=%s attempt=%s work_title=%r ep_name=%r ep_no=%s",
+                job.id, job.ep_id, job.voice_slot, job.voice_profile_version, job.attempt_count,
+                job.work_title, job.ep_name, job.ep_no,
+            )
+            if self.events and self.events.on_job_started:
+                self.events.on_job_started(job)
             wav_paths: list[Path] = []
             block_durations: list[tuple[str, float]] = []
             total_blocks = len(job.blocks)
@@ -252,6 +286,8 @@ class Worker:
                 LOGGER.info("job_discarded_stale_or_cancelled id=%s", job.id)
                 return
             LOGGER.info("job_completed id=%s episode=%s slot=%s duration=%.3f", job.id, job.ep_id, job.voice_slot, duration_seconds)
+            if self.events and self.events.on_job_completed:
+                self.events.on_job_completed(job.id, duration_seconds)
         except Exception as error:
             if uploaded and audio_key is not None:
                 try:
@@ -268,6 +304,8 @@ class Worker:
                 self.narrator.release_cuda_cache()
             LOGGER.error("job_failed id=%s error=%s", job.id, error_message)
             LOGGER.debug("job_traceback id=%s\n%s", job.id, traceback.format_exc())
+            if self.events and self.events.on_job_failed:
+                self.events.on_job_failed(job.id, error_message, code)
             with suppress(Exception):
                 self.repository.fail(
                     job,

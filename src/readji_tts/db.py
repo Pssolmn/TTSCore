@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 import hashlib
 import json
+import logging
 from typing import Any
 
 import psycopg
@@ -11,12 +13,26 @@ from psycopg.types.json import Jsonb
 
 from .schemas import ClaimedJob, NovelBlock, source_hash, with_timestamps, BlockTimestamp
 
+LOGGER = logging.getLogger("readji_tts")
+
 
 class JobRepository:
-    def __init__(self, database_url: str, worker_id: str, lease_seconds: int) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        worker_id: str,
+        lease_seconds: int,
+        *,
+        on_activity: Callable[[], None] | None = None,
+        on_progress: Callable[[int, int, int, int | None], None] | None = None,
+    ) -> None:
         self.connection = psycopg.connect(database_url, row_factory=dict_row)
         self.worker_id = worker_id
         self.lease_seconds = lease_seconds
+        # GUI hooks only. Both default to None so the headless worker entry
+        # point is byte-for-byte unaffected when it constructs a repository.
+        self._on_activity = on_activity
+        self._on_progress = on_progress
 
     def close(self) -> None:
         self.connection.close()
@@ -49,6 +65,11 @@ class JobRepository:
             """,
             (self.worker_id, current_job_id),
         )
+        # Fires on every poll cycle whether idle or busy, so this is the GUI's
+        # connection-status signal: a real, frequent, truthful "we just talked
+        # to Postgres successfully" event with no second/racing connection.
+        if self._on_activity:
+            self._on_activity()
 
     def _record_event(
         self,
@@ -195,13 +216,38 @@ class JobRepository:
                     (job["request_id"],),
                 )
                 self._touch_worker(cursor, int(job["id"]))
-                cursor.execute("SELECT ep_content FROM work_ep WHERE ep_id = %s FOR SHARE", (job["ep_id"],))
-                episode = cursor.fetchone()
+                # Display-only enrichment (work title / episode name+number)
+                # for the GUI's status line and log. LEFT JOIN, not INNER: if
+                # `works` were ever missing for a p_id, an inner join would
+                # silently drop the work_ep row too, turning a missing
+                # *enrichment* field into a false "episode disappeared"
+                # failure below. The nested transaction becomes a SAVEPOINT
+                # in psycopg3, so a genuine SQL error here (e.g. a future
+                # column rename) only unwinds this attempt -- the outer
+                # transaction, and the plain fallback query, stay usable.
+                try:
+                    with self.connection.transaction():
+                        cursor.execute(
+                            """
+                            SELECT we.ep_content, we.ep_name, we.ep_no, w.title AS work_title
+                            FROM work_ep we
+                            LEFT JOIN works w ON w.p_id = we.p_id
+                            WHERE we.ep_id = %s
+                            FOR SHARE
+                            """,
+                            (job["ep_id"],),
+                        )
+                        episode = cursor.fetchone()
+                except Exception:
+                    LOGGER.warning("episode_metadata_join_failed ep_id=%s", job["ep_id"])
+                    cursor.execute("SELECT ep_content FROM work_ep WHERE ep_id = %s FOR SHARE", (job["ep_id"],))
+                    episode = cursor.fetchone()
                 if episode is None:
                     raise RuntimeError(f"Episode {job['ep_id']} disappeared after job {job['id']} was claimed")
                 raw_blocks = episode["ep_content"] or []
                 if not isinstance(raw_blocks, list):
                     raise RuntimeError(f"Episode {job['ep_id']} has an invalid ep_content value")
+                ep_no = episode.get("ep_no")
                 return ClaimedJob(
                     id=int(job["id"]),
                     ep_id=int(job["ep_id"]),
@@ -212,6 +258,9 @@ class JobRepository:
                     attempt_count=int(job["attempt_count"]),
                     max_attempts=int(job["max_attempts"]),
                     blocks=[NovelBlock.from_db(item) for item in raw_blocks],
+                    work_title=episode.get("work_title"),
+                    ep_name=episode.get("ep_name"),
+                    ep_no=int(ep_no) if ep_no is not None else None,
                 )
 
     def prepare_block_manifest(self, job: ClaimedJob) -> None:
@@ -309,6 +358,11 @@ class JobRepository:
                 )
                 updated = cursor.rowcount == 1
                 self._touch_worker(cursor, job_id)
+                # Gated on `updated`: a doomed final call right before a
+                # lease-loss failure must not tick the GUI's progress bar
+                # with numbers that never actually got committed.
+                if updated and self._on_progress:
+                    self._on_progress(job_id, total_blocks, completed_blocks, current_block)
                 return updated
 
     def complete(

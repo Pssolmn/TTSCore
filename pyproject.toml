@@ -21,6 +21,7 @@ dev = ["pytest>=8,<9"]
 
 [project.scripts]
 readji-tts-worker = "readji_tts.worker:main"
+readji-tts-gui = "readji_tts.gui:main"
 readji-tts-voice-design = "readji_tts.voice_design:main"
 
 [tool.pytest.ini_options]
