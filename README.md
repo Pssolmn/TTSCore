@@ -2,6 +2,12 @@
 
 This is the production Python worker for Readji's Tier 0 novel narration. It claims one job at a time from `tts_jobs`, synthesizes every `NovelBlock` with VoxCPM2, concatenates the audio with ffmpeg, uploads an immutable MP3 to Cloudflare R2, and commits block timestamps only if the episode has not changed.
 
+Manual Tier 1/Pro wiring is also present: one `pro` job can use a frozen
+per-slot assignment snapshot and switch the reference WAV per block. It is
+**disabled by default** with `TTS_PRO_RENDER_ENABLED=false`. Do not enable it
+until Pro reference folders have been checked and a small end-to-end test has
+been explicitly approved.
+
 ## Prerequisites
 
 - Windows with NVIDIA driver and CUDA-capable GPU (the current RTX 4060 runs one sequential worker)
@@ -25,9 +31,51 @@ For the current local Phase A setup, the worker automatically reads the existing
 
 ## Reader voice slots (Basic tier)
 
-Basic-tier chapters are always rendered with a single narrator voice, one of three fixed reader-facing slots: `old_male` (ชายแก่), `young_male` (หนุ่มน้อย), and `female` (คุณผู้หญิง). The source WAV for each slot is a real file on disk at `assets/voices/Basic/<slot>.wav` -- there is no config file to edit. To replace a voice, place the legally usable WAV directly at that path before queuing new renders. The profile version is hardcoded to `v1` in `load_basic_voice_profiles()`; every render has a unique job ID in its R2 key, so it is safe to replace a source file without changing reader slot names or releasing the frontend.
+Basic-tier chapters are always rendered with a single narrator voice, one of three fixed reader-facing slots: `old_male` (ชายแก่), `young_male` (หนุ่มน้อย), and `female` (คุณผู้หญิง). The source WAV for each slot is a real file on disk at `assets/voices/Basic/Basic_<slot>.wav` -- there is no config file to edit. To replace a voice, place the legally usable WAV directly at that path before queuing new renders. The profile version is hardcoded to `v1` in `load_basic_voice_profiles()`; every render has a unique job ID in its R2 key, so it is safe to replace a source file without changing reader slot names or releasing the frontend.
 
-The current files are the real candidate voices already reviewed on this machine: `assets/voices/Basic/old_male.wav` (ชายแก่), `assets/voices/Basic/young_male.wav` (หนุ่มน้อย), and `assets/voices/Basic/female.wav` (คุณผู้หญิง).
+## Per-voice timing
+
+Open **ตั้งค่า** in the desktop worker, select a WAV in **Voice render settings**, and set its optional silence before the episode starts and between spoken blocks. The tray scans every `.wav` below `assets/voices/`, including newly copied Pro-category folders; a new file defaults to zero added silence until it is configured. Values are stored by portable relative path in `assets/voices/voice-render-settings.json`, take effect on the next job the worker claims, and are included in the final timestamps. The starting preset for `Basic/Basic_female.wav` is 0.18 seconds before the episode and 0.12 seconds between ordinary spoken blocks.
+
+Changing a timing value cannot alter an MP3 already published to R2. Queue a new render for the episode/voice after saving if the existing audio should use the new pacing.
+
+The current files are the real candidate voices already reviewed on this machine: `assets/voices/Basic/Basic_old_male.wav` (ชายแก่), `assets/voices/Basic/Basic_young_male.wav` (หนุ่มน้อย), and `assets/voices/Basic/Basic_female.wav` (คุณผู้หญิง).
+
+## Published audio format and size
+
+Every completed job publishes a **mono MP3 at 32 kHz / 32 kbps** by default.
+This is roughly one quarter of the former 128 kbps output size while remaining
+appropriate for spoken narration. MP3 is compressed audio and has no fixed
+"16-bit" field; the worker does use a 16-bit PCM WAV only as an internal
+ffmpeg intermediate, then deletes it before the R2 upload.
+
+Set these only when a deployment needs a different trade-off, then restart the
+worker. They affect newly rendered jobs only; an MP3 already on R2 must be
+rendered again to change its format.
+
+```env
+TTS_OUTPUT_SAMPLE_RATE=32000
+TTS_OUTPUT_MP3_BITRATE_KBPS=32
+```
+
+For noticeably higher fidelity, a practical next step is `48000` Hz and
+`48` kbps; increasing bitrate increases file size almost linearly.
+
+### Writer preview for Basic voices
+
+The public writer preview is a separate, generated WAV bundled with the web
+app at `Novel Platform/apps/web/public/audio/tts-samples/basic/<slot>.wav`.
+It is deliberately not uploaded to R2 and it never replaces the source WAV in
+`assets/voices/Basic/`. Generate all three preview files after approving a
+source voice (or after replacing one) with:
+
+```powershell
+readji-tts-basic-preview
+```
+
+That command uses each current `Basic_<slot>.wav` as VoxCPM's reference voice
+and speaks one fixed demonstration sentence. Commit/deploy the generated web
+files with the web app; moving that app carries the previews with it.
 
 ## Novel text handling
 
@@ -39,7 +87,7 @@ Before inference, the worker keeps Thai, English, digits, and narration punctuat
 readji-tts-voice-design
 ```
 
-The command writes Thai narration candidates into `assets/voice-candidates`. Listen to them and copy the approved, legally usable file to the matching slot at `assets/voices/Basic/<slot>.wav`. `TTS_MASTER_VOICE_PATH` remains only for legacy voice-design tooling; normal reader jobs use the Basic slot files.
+The command writes Thai narration candidates into `assets/voice-candidates`. Listen to them and copy the approved, legally usable file to the matching slot at `assets/voices/Basic/Basic_<slot>.wav`. `TTS_MASTER_VOICE_PATH` remains only for legacy voice-design tooling; normal reader jobs use the Basic slot files.
 
 ## Run
 
@@ -47,7 +95,7 @@ The command writes Thai narration candidates into `assets/voice-candidates`. Lis
 readji-tts-worker
 ```
 
-The first run downloads `openbmb/VoxCPM2`. A worker does not process any job without a master voice, GPU, database connection, R2 configuration, or ffmpeg; it fails fast instead of publishing partial audio.
+The first run downloads `openbmb/VoxCPM2`. A worker does not process any job without the three Basic reference WAVs, GPU, database connection, R2 configuration, or ffmpeg; it fails fast instead of publishing partial audio. `TTS_MASTER_VOICE_PATH` is required only by legacy voice-design tooling.
 
 ## Operating guarantees
 

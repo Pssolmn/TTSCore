@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 import subprocess
-from typing import Iterable
+from typing import Iterable, Sequence
 import unicodedata
 
 import numpy as np
@@ -18,7 +18,9 @@ SCENE_BREAK_PATTERN = re.compile(r"^\s*(?:\*\s*){1,}$")
 ELLIPSIS_PAUSE_SECONDS = 0.55
 SCENE_BREAK_PAUSE_SECONDS = 1.25
 SUPPORTED_TTS_CHARACTER = re.compile(r"[A-Za-z0-9\u0E00-\u0E7F\s.,!?;:'\"()\[\]{}…—–\-_/+=&#%@]")
-EDITOR_DIRECTIVE = re.compile(r"//([A-Za-z0-9_-]+)|\{(pause\s*:\s*[0-9]+(?:\.[0-9]+)?|skip|breath)\}", re.IGNORECASE)
+# Character aliases may be Thai or ASCII. Core numeric directives keep the
+# same form; every matched alias is metadata and must never be pronounced.
+EDITOR_DIRECTIVE = re.compile(r"//([A-Za-z0-9_\-\u0E00-\u0E7F]+)|\{(pause\s*:\s*[0-9]+(?:\.[0-9]+)?|skip|breath)\}", re.IGNORECASE)
 EDITOR_CORE_PAUSES = {"1": 0.25, "2": 0.5, "3": 1.0, "4": 2.0, "6": 0.25}
 
 
@@ -148,6 +150,8 @@ def count_render_output_blocks(
     blocks: Iterable[NovelBlock],
     max_chunk_chars: int,
     *,
+    inter_block_silence_seconds: float = 0.0,
+    inter_block_silence_seconds_by_block: Sequence[float] | None = None,
     stop_after: int | None = None,
 ) -> int:
     """Count temporary WAVs the worker would create without synthesizing.
@@ -157,16 +161,46 @@ def count_render_output_blocks(
     preflight scan as soon as an enforced limit is exceeded, instead of doing
     avoidable work on a deliberately oversized request.
     """
+    block_list = list(blocks)
     output_blocks = 0
-    for block in blocks:
-        for segment in plan_tts_segments(block.tts_text or block.text, block.tts):
+    for index, block in enumerate(block_list):
+        segments = plan_tts_segments(block.tts_text or block.text, block.tts)
+        for segment in segments:
             if segment.text:
                 output_blocks += len(split_text(segment.text, max_chunk_chars))
             elif segment.silence_seconds > 0:
                 output_blocks += 1
             if stop_after is not None and output_blocks > stop_after:
                 return output_blocks
+        block_silence = (
+            inter_block_silence_seconds_by_block[index]
+            if inter_block_silence_seconds_by_block is not None
+            else inter_block_silence_seconds
+        )
+        if should_add_inter_block_silence(segments, index, len(block_list), block_silence):
+            output_blocks += 1
+            if stop_after is not None and output_blocks > stop_after:
+                return output_blocks
     return output_blocks
+
+
+def should_add_inter_block_silence(
+    segments: Iterable[SynthesisSegment],
+    block_index: int,
+    total_blocks: int,
+    inter_block_silence_seconds: float,
+) -> bool:
+    """Whether a rendered block gets an operator-configured trailing pause."""
+    planned = list(segments)
+    return (
+        inter_block_silence_seconds > 0
+        and block_index < total_blocks - 1
+        and any(segment.text for segment in planned)
+        # Do not double a pause already deliberately written into this block,
+        # such as an ending ellipsis or editor pause directive.
+        and bool(planned)
+        and planned[-1].text is not None
+    )
 
 
 def write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> float:
@@ -187,7 +221,21 @@ def write_silence_wav(path: Path, duration_seconds: float, sample_rate: int) -> 
     return frames / sample_rate
 
 
-def concatenate_to_mp3(wav_paths: list[Path], output_mp3: Path, *, ffmpeg_path: str) -> float:
+def concatenate_to_mp3(
+    wav_paths: list[Path],
+    output_mp3: Path,
+    *,
+    ffmpeg_path: str,
+    output_sample_rate: int = 32_000,
+    mp3_bitrate_kbps: int = 32,
+) -> float:
+    """Concatenate mono WAV blocks into a compact MP3 publication file.
+
+    MP3 is a lossy compressed format and has no meaningful PCM "bit depth".
+    ``pcm_s16le`` below is only the 16-bit temporary WAV used by ffmpeg; it is
+    deleted before upload.  The published file's size is controlled chiefly by
+    ``mp3_bitrate_kbps`` and, secondarily, ``output_sample_rate``.
+    """
     if not wav_paths:
         raise ValueError("Episode has no audible blocks")
     output_wav = output_mp3.with_suffix(".wav")
@@ -197,14 +245,15 @@ def concatenate_to_mp3(wav_paths: list[Path], output_mp3: Path, *, ffmpeg_path: 
         subprocess.run(
             [
                 ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
-                "-i", str(manifest), "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", str(output_wav),
+                "-i", str(manifest), "-ar", str(output_sample_rate), "-ac", "1", "-c:a", "pcm_s16le", str(output_wav),
             ],
             check=True,
         )
         subprocess.run(
             [
                 ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error", "-i", str(output_wav),
-                "-c:a", "libmp3lame", "-b:a", "128k", "-map_metadata", "-1", str(output_mp3),
+                "-ar", str(output_sample_rate), "-ac", "1", "-c:a", "libmp3lame", "-b:a", f"{mp3_bitrate_kbps}k",
+                "-map_metadata", "-1", str(output_mp3),
             ],
             check=True,
         )
@@ -215,8 +264,10 @@ def concatenate_to_mp3(wav_paths: list[Path], output_mp3: Path, *, ffmpeg_path: 
         output_wav.unlink(missing_ok=True)
 
 
-def timestamps_from_durations(block_durations: Iterable[tuple[str, float]]) -> list[BlockTimestamp]:
-    cursor = 0.0
+def timestamps_from_durations(
+    block_durations: Iterable[tuple[str, float]], *, initial_offset_seconds: float = 0.0
+) -> list[BlockTimestamp]:
+    cursor = initial_offset_seconds
     timestamps: list[BlockTimestamp] = []
     for block_id, duration in block_durations:
         start = cursor

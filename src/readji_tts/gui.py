@@ -12,11 +12,11 @@ import tkinter.font as tkfont
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from .config import BASIC_VOICE_FOLDER_NAME, describe_database_target, load_basic_voice_profiles, load_settings, resolve_env_file
+from .config import Settings, describe_database_target, load_basic_voice_profiles, load_settings, resolve_env_file
 from .instance_lock import AlreadyRunningError
 from .scheduled_task import get_boot_task_state, set_boot_task_state
 from .schemas import ClaimedJob
-from .voice_variants import scan_voice_variants
+from .voice_render_settings import DEFAULT_TIMING, VoiceRenderSettingsStore, VoiceRenderTiming, scan_voice_reference_files
 from .worker import LOGGER as WORKER_LOGGER, Worker, WorkerEvents, configure_logging
 
 LOG_PANEL_MAX_LINES = 2000
@@ -94,6 +94,8 @@ class ReadjiTtsGui:
 
         self.event_queue: "queue.Queue" = queue.Queue()
         self.worker: Worker | None = None
+        self.settings: Settings | None = None
+        self.voice_render_settings: VoiceRenderSettingsStore | None = None
         self.worker_thread: threading.Thread | None = None
         self._closing = False
         self._shutdown_deadline = 0.0
@@ -101,6 +103,7 @@ class ReadjiTtsGui:
         self._connection_state = "connecting"
         self._db_target_text: str | None = None
         self._current_job_label: str | None = None
+        self._voice_paths_by_tree_id: dict[str, Path] = {}
 
         self._build_widgets()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -160,6 +163,7 @@ class ReadjiTtsGui:
         except Exception as error:
             self.event_queue.put(("startup_failed", str(error)))
             return
+        self.event_queue.put(("settings_loaded", settings))
 
         configure_logging(settings.work_dir / "worker.log")
         WORKER_LOGGER.addHandler(QueueLogHandler(self.event_queue))
@@ -230,12 +234,18 @@ class ReadjiTtsGui:
             self._db_target_text = item[1]
             self.status_var.set("ว่าง — รอรายการถัดไป…")
             self._set_connection_state("connected")
+        elif kind == "settings_loaded":
+            self.settings = item[1]
+            self.voice_render_settings = VoiceRenderSettingsStore(self.settings.voice_variants_path)
         elif kind == "worker_stopped":
             pass
         elif kind == "already_running":
-            self._closing = True
-            messagebox.showerror("เปิดซ้ำไม่ได้", item[1])
-            self.root.destroy()
+            # The desktop window remains useful as a local voice-settings
+            # editor while the scheduled headless worker owns the GPU/lock.
+            # Timing changes are picked up by that worker on its next job.
+            self.status_var.set("โหมดตั้งค่า — worker หลักกำลังทำงานอยู่")
+            self._set_connection_state("stale")
+            messagebox.showinfo("โหมดตั้งค่า", "worker กำลังทำงานอยู่ จึงเปิดหน้าตั้งค่าโดยไม่สร้าง worker ซ้ำ")
         elif kind == "startup_failed":
             self._set_connection_state("error")
             self.status_var.set("เริ่มโปรแกรมไม่สำเร็จ — ดูรายละเอียดในกล่องข้อความ")
@@ -299,7 +309,7 @@ class ReadjiTtsGui:
     # ---- Buttons ------------------------------------------------------------
 
     def _on_settings(self) -> None:
-        if self.worker is None:
+        if self._current_settings() is None:
             messagebox.showinfo("ตั้งค่า", "โปรแกรมยังไม่พร้อม กรุณารอสักครู่แล้วลองใหม่")
             return
 
@@ -312,15 +322,41 @@ class ReadjiTtsGui:
         outer = ttk.Frame(dialog, padding=10)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        # ส่วนที่ 1: ข้อมูล settings อ่านอย่างเดียว (เดิม)
-        info_text = ScrolledText(outer, wrap=tk.WORD, height=14)
-        info_text.pack(fill=tk.X, pady=(0, 8))
+        # รายละเอียด connection/.env มีประโยชน์เวลาตรวจปัญหา แต่ไม่ควรกิน
+        # พื้นที่ส่วนตั้งจังหวะเสียงทุกครั้งที่เปิดหน้าต่าง จึงเริ่มแบบยุบไว้
+        # และให้ผู้ใช้กดเปิดเฉพาะเมื่อต้องการดูจริง ๆ.
+        info_frame = ttk.LabelFrame(outer, text="ข้อมูลระบบและ .env")
+        info_text = ScrolledText(info_frame, wrap=tk.WORD, height=9)
+        info_text.pack(fill=tk.X, padx=6, pady=(6, 4))
         self._populate_settings_info(info_text)
 
-        # สร้าง Variant Tray ไว้ตรงนี้ก่อน (แต่ยัง .pack() ทีหลังสุด) เพื่อให้
-        # ปุ่มรีเฟรชด้านล่างอ้างอิง `tree` ได้ -- การสร้าง widget ไม่ผูกกับ
-        # ตำแหน่งในเลย์เอาต์เลย มีแค่ .pack() เท่านั้นที่กำหนดลำดับที่เห็นจริง
-        tray_frame = ttk.LabelFrame(outer, text="Variant Tray")
+        def open_env_folder() -> None:
+            env_file = resolve_env_file()
+            folder = env_file.parent if env_file.parent.is_dir() else Path.cwd()
+            try:
+                os.startfile(str(folder))  # noqa: S606 -- local folder only, Windows-only tool
+            except Exception as error:
+                messagebox.showerror("เปิดโฟลเดอร์ไม่สำเร็จ", str(error))
+
+        ttk.Button(info_frame, text="เปิดโฟลเดอร์ .env", command=open_env_folder).pack(anchor=tk.W, padx=6, pady=(0, 6))
+        info_visible = False
+
+        def toggle_info() -> None:
+            nonlocal info_visible
+            info_visible = not info_visible
+            if info_visible:
+                info_frame.pack(fill=tk.X, pady=(0, 8), before=toggle_info_button)
+                toggle_info_button.configure(text="ซ่อนข้อมูลระบบและ .env")
+            else:
+                info_frame.pack_forget()
+                toggle_info_button.configure(text="แสดงข้อมูลระบบและ .env")
+
+        toggle_info_button = ttk.Button(outer, text="แสดงข้อมูลระบบและ .env", command=toggle_info)
+        toggle_info_button.pack(fill=tk.X, pady=(0, 8))
+
+        # สแกน WAV จากทุกโฟลเดอร์จริง ไม่ผูกกับจำนวน Basic slot หรือ naming
+        # convention ของ Pro จึงเห็นไฟล์ที่เพิ่ง copy เข้ามาทันทีหลังรีเฟรช.
+        tray_frame = ttk.LabelFrame(outer, text="Voice render settings")
         tree = self._build_variant_tree(tray_frame)
 
         # ส่วนที่ 2: ปุ่มรีเฟรช (ย้ายมาจากหน้าต่างหลัก) + ไปที่โฟลเดอร์ TTSCore
@@ -333,30 +369,21 @@ class ReadjiTtsGui:
             actions_row, text="ไปที่โฟลเดอร์ TTSCore", command=self._open_ttscore_root
         ).pack(side=tk.LEFT, padx=(8, 0))
 
-        # ส่วนที่ 3: ปุ่มเปิดโฟลเดอร์ .env เดิม -- ตำแหน่ง/โค้ดเดิมไม่แตะ
-        def open_env_folder() -> None:
-            env_file = resolve_env_file()
-            folder = env_file.parent if env_file.parent.is_dir() else Path.cwd()
-            try:
-                os.startfile(str(folder))  # noqa: S606 -- local folder only, Windows-only tool
-            except Exception as error:
-                messagebox.showerror("เปิดโฟลเดอร์ไม่สำเร็จ", str(error))
-
-        ttk.Button(outer, text="เปิดโฟลเดอร์ .env", command=open_env_folder).pack(anchor=tk.W, pady=(0, 8))
-
-        # ส่วนที่ 4: toggle เปิด/ปิด auto-start ตอน boot
+        # ส่วนที่ 3: toggle เปิด/ปิด auto-start ตอน boot
         boot_row = ttk.Frame(outer)
         boot_row.pack(fill=tk.X, pady=(0, 8))
         self._build_boot_toggle_row(boot_row)
 
-        # ส่วนที่ 5 (ต่อ): pack Variant Tray ท้ายสุด ให้มันยืดรับพื้นที่ที่เหลือ
+        self._build_voice_timing_editor(outer, tree)
+
+        # ส่วนที่ 4 (ต่อ): pack Variant Tray ท้ายสุด ให้มันยืดรับพื้นที่ที่เหลือ
         tray_frame.pack(fill=tk.BOTH, expand=True)
         self._populate_variant_tree(tree)
 
     def _populate_settings_info(self, text: ScrolledText) -> None:
-        if self.worker is None:
+        settings = self._current_settings()
+        if settings is None:
             return
-        settings = self.worker.settings
         rows = [
             ("Database", describe_database_target(settings.database_url)),
             ("R2 endpoint", settings.r2_endpoint_url),
@@ -375,6 +402,7 @@ class ReadjiTtsGui:
             ("Worker ID", settings.worker_id),
             ("Work dir", str(settings.work_dir)),
             ("ffmpeg path", settings.ffmpeg_path),
+            ("Published audio", f"MP3 mono · {settings.output_sample_rate / 1_000:g} kHz · {settings.output_mp3_bitrate_kbps} kbps"),
             ("Basic voice folder", str(settings.voice_basic_path)),
             ("Voice variants folder", str(settings.voice_variants_path)),
             (".env in use", str(resolve_env_file())),
@@ -384,6 +412,9 @@ class ReadjiTtsGui:
         for label, value in rows:
             text.insert(tk.END, f"{label}:\n    {value}\n\n")
         text.configure(state=tk.DISABLED)
+
+    def _current_settings(self) -> Settings | None:
+        return self.worker.settings if self.worker is not None else self.settings
 
     def _open_ttscore_root(self) -> None:
         # src/readji_tts/gui.py -> parents[0]=src/readji_tts, [1]=src, [2]=repo root
@@ -437,13 +468,15 @@ class ReadjiTtsGui:
         ttk.Style().configure("Treeview", rowheight=30)
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        tree = ttk.Treeview(tree_frame, columns=("count", "detail"), show="tree headings")
+        tree = ttk.Treeview(tree_frame, columns=("lead_in", "block_gap", "detail"), show="tree headings")
         tree.heading("#0", text="หมวดหมู่ / ไฟล์")
-        tree.heading("count", text="จำนวน")
+        tree.heading("lead_in", text="ก่อนเริ่ม")
+        tree.heading("block_gap", text="ระหว่างบล็อก")
         tree.heading("detail", text="รายละเอียด")
         tree.column("#0", width=220)
-        tree.column("count", width=80, anchor=tk.CENTER)
-        tree.column("detail", width=280)
+        tree.column("lead_in", width=90, anchor=tk.CENTER)
+        tree.column("block_gap", width=100, anchor=tk.CENTER)
+        tree.column("detail", width=180)
         scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -452,56 +485,99 @@ class ReadjiTtsGui:
 
     def _populate_variant_tree(self, tree: ttk.Treeview) -> None:
         tree.delete(*tree.get_children())
-        if self.worker is None:
+        settings = self._current_settings()
+        if settings is None:
             return
-
-        # Basic: อ่านจาก self.worker.voice_profiles ที่มีอยู่แล้วในหน่วยความจำ
-        # ตรงๆ ไม่เรียก load_basic_voice_profiles() ซ้ำเอง -- ถ้ารีเฟรชล้มเหลว
-        # dict เดิมจะยังอยู่ที่ worker เหมือนเดิม (ดู _on_dialog_refresh) จึง
-        # ยังโชว์ข้อมูลล่าสุดที่ใช้งานได้จริงเสมอโดยไม่ต้องเขียน error
-        # handling เพิ่มตรงนี้เลย -- iid คงเป็น "main" ไว้ (ไม่โชว์ผู้ใช้เห็น)
-        profiles = self.worker.voice_profiles
-        main_id = tree.insert(
-            "", tk.END, iid="main", text="Basic", open=True,
-            values=(len(profiles), "โฟลเดอร์เสียง Basic จริงบนดิสก์ (3 slot คงที่) ใช้เรนเดอร์ Basic tier เสมอ"),
-        )
-        for slot in sorted(profiles):
-            profile = profiles[slot]
-            tree.insert("main", tk.END, iid=f"main/{slot}", text=f"{slot} ({profile.label})", values=("", str(profile.reference_wav_path)))
-
+        store = self.voice_render_settings or VoiceRenderSettingsStore(settings.voice_variants_path)
+        self.voice_render_settings = store
         try:
-            registry = scan_voice_variants(self.worker.settings.voice_variants_path.resolve())
+            timings = store.load()
+            files = scan_voice_reference_files(settings.voice_variants_path)
         except Exception as error:
-            WORKER_LOGGER.warning("voice_variant_scan_failed error=%s", error)
+            WORKER_LOGGER.warning("voice_render_settings_scan_failed error=%s", error)
             messagebox.showerror("สแกนโฟลเดอร์เสียงไม่สำเร็จ", str(error))
             return
 
-        for name in sorted(registry.categories):
-            # Basic ถูกแสดงเป็นแถวคงที่ด้านบนแล้ว (จาก self.worker.voice_profiles
-            # โดยตรง) -- ไฟล์ {slot}.wav ข้างในไม่ตรง pattern {category}_{index}
-            # ของ scan_voice_variants() อยู่แล้ว แต่ยังกันไว้ชัดเจนไม่ให้โผล่ซ้ำ
-            # เป็นหมวด dynamic ปลอมๆ ถ้ามีคนเพิ่มไฟล์ที่ตรง pattern เข้าไปในนั้น
-            if name.casefold() == BASIC_VOICE_FOLDER_NAME.casefold():
-                continue
-            category = registry.categories[name]
-            detail = f"ข้าม {len(category.skipped_files)} ไฟล์" if category.skipped_files else ""
-            cat_id = tree.insert(
-                "", tk.END, iid=f"cat:{name}", text=name, open=False,
-                values=(len(category.variants), detail),
+        self._voice_paths_by_tree_id = {}
+        category_ids: dict[str, str] = {}
+        for voice_path in files:
+            key = store.key_for(voice_path)
+            category = voice_path.parent.relative_to(settings.voice_variants_path.resolve()).as_posix() or "(root)"
+            category_id = category_ids.get(category)
+            if category_id is None:
+                category_id = f"category:{len(category_ids)}"
+                category_ids[category] = category_id
+                tree.insert("", tk.END, iid=category_id, text=category, open=category.casefold() == "basic", values=("", "", ""))
+            timing = timings.get(key, DEFAULT_TIMING)
+            voice_id = f"voice:{len(self._voice_paths_by_tree_id)}"
+            self._voice_paths_by_tree_id[voice_id] = voice_path
+            detail = "ค่าเริ่มต้น" if timing == DEFAULT_TIMING else key
+            tree.insert(
+                category_id,
+                tk.END,
+                iid=voice_id,
+                text=voice_path.name,
+                values=(f"{timing.lead_in_seconds:.2f} วินาที", f"{timing.inter_block_silence_seconds:.2f} วินาที", detail),
             )
-            for index in sorted(category.variants):
-                variant = category.variants[index]
-                tree.insert(
-                    cat_id, tk.END, iid=f"cat:{name}/{index}", text=f"{name}_{index}",
-                    values=("", variant.wav_path.name),
+
+    def _build_voice_timing_editor(self, parent: ttk.Frame, tree: ttk.Treeview) -> None:
+        frame = ttk.LabelFrame(parent, text="ตั้งจังหวะไฟล์เสียงที่เลือก")
+        frame.pack(fill=tk.X, pady=(0, 8))
+        selected_var = tk.StringVar(value="เลือกไฟล์ WAV จากรายการด้านล่าง")
+        lead_in_var = tk.StringVar(value="0")
+        block_gap_var = tk.StringVar(value="0")
+        ttk.Label(frame, textvariable=selected_var).grid(row=0, column=0, columnspan=6, sticky=tk.W, padx=8, pady=(6, 4))
+        ttk.Label(frame, text="เงียบก่อนเริ่ม (วินาที)").grid(row=1, column=0, sticky=tk.W, padx=(8, 2), pady=(0, 8))
+        ttk.Spinbox(frame, from_=0, to=3, increment=0.01, width=7, textvariable=lead_in_var).grid(row=1, column=1, padx=(0, 12), pady=(0, 8))
+        ttk.Label(frame, text="เงียบระหว่างบล็อก (วินาที)").grid(row=1, column=2, sticky=tk.W, padx=(0, 2), pady=(0, 8))
+        ttk.Spinbox(frame, from_=0, to=3, increment=0.01, width=7, textvariable=block_gap_var).grid(row=1, column=3, padx=(0, 12), pady=(0, 8))
+
+        def selected_voice_path() -> Path | None:
+            selection = tree.selection()
+            return self._voice_paths_by_tree_id.get(selection[0]) if selection else None
+
+        def on_selected(_: object) -> None:
+            voice_path = selected_voice_path()
+            if voice_path is None or self.voice_render_settings is None:
+                return
+            try:
+                timing = self.voice_render_settings.timing_for(voice_path)
+            except Exception as error:
+                messagebox.showerror("อ่านค่าเสียงไม่สำเร็จ", str(error))
+                return
+            selected_var.set(str(voice_path))
+            lead_in_var.set(f"{timing.lead_in_seconds:.2f}")
+            block_gap_var.set(f"{timing.inter_block_silence_seconds:.2f}")
+
+        def save() -> None:
+            voice_path = selected_voice_path()
+            if voice_path is None or self.voice_render_settings is None:
+                messagebox.showinfo("ตั้งจังหวะ", "เลือกไฟล์ WAV ที่ต้องการตั้งค่าก่อน")
+                return
+            try:
+                timing = VoiceRenderTiming(
+                    lead_in_seconds=float(lead_in_var.get()),
+                    inter_block_silence_seconds=float(block_gap_var.get()),
                 )
+                self.voice_render_settings.save_timing(voice_path, timing)
+            except (ValueError, RuntimeError) as error:
+                messagebox.showerror("บันทึกไม่สำเร็จ", str(error))
+                return
+            self._populate_variant_tree(tree)
+            WORKER_LOGGER.info("voice_render_timing_saved path=%s lead_in=%.3f inter_block=%.3f", voice_path, timing.lead_in_seconds, timing.inter_block_silence_seconds)
+            messagebox.showinfo("ตั้งจังหวะ", "บันทึกแล้ว มีผลกับงานใหม่ที่ worker รับหลังจากนี้")
+
+        ttk.Button(frame, text="คืนค่า 0", command=lambda: (lead_in_var.set("0"), block_gap_var.set("0"))).grid(row=1, column=4, padx=(0, 6), pady=(0, 8))
+        ttk.Button(frame, text="บันทึก", command=save).grid(row=1, column=5, padx=(0, 8), pady=(0, 8))
+        tree.bind("<<TreeviewSelect>>", on_selected)
 
     def _on_dialog_refresh(self, info_text: ScrolledText, tree: ttk.Treeview) -> None:
-        if self.worker is None:
+        settings = self._current_settings()
+        if settings is None:
             messagebox.showinfo("รีเฟรช", "โปรแกรมยังไม่พร้อม กรุณารอสักครู่แล้วลองใหม่")
             return
         try:
-            profiles = load_basic_voice_profiles(self.worker.settings.voice_basic_path)
+            profiles = load_basic_voice_profiles(settings.voice_basic_path)
         except Exception as error:
             WORKER_LOGGER.warning("voice_profile_refresh_failed error=%s", error)
             messagebox.showerror("รีเฟรชไม่สำเร็จ", str(error))
@@ -511,7 +587,8 @@ class ReadjiTtsGui:
         # complete old or complete new dict under the GIL, never a torn one.
         # A job already past get_voice_profile() captured its own profile in
         # a local variable, so this never disturbs a render in progress.
-        self.worker.voice_profiles = profiles
+        if self.worker is not None:
+            self.worker.voice_profiles = profiles
         WORKER_LOGGER.info("voice_profile_refreshed slots=%s", ", ".join(sorted(profiles)))
         self._populate_settings_info(info_text)
         self._populate_variant_tree(tree)

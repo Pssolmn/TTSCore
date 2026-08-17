@@ -18,17 +18,21 @@ from .audio import (
     concatenate_to_mp3,
     count_render_output_blocks,
     plan_tts_segments,
+    should_add_inter_block_silence,
     split_text,
     timestamps_from_durations,
     write_silence_wav,
     write_wav,
 )
-from .config import Settings, VoiceProfile, load_basic_voice_profiles, load_settings
+from .config import Settings, VoiceProfile, guard_remote_database, load_basic_voice_profiles, load_settings
 from .db import JobRepository
 from .instance_lock import acquire_single_instance_lock
 from .provider import VoxCpmNarrator
 from .r2 import R2Storage
 from .schemas import ClaimedJob
+from .voice_render_settings import VoiceRenderSettingsStore
+from .voice_plan import parse_voice_assignments, resolve_pro_block_references
+from .voice_resolution import resolve_voice_reference
 
 
 LOGGER = logging.getLogger("readji_tts")
@@ -56,6 +60,10 @@ def classify_failure(error: Exception) -> tuple[str, str, bool]:
         return "NO_SUPPORTED_TEXT", "validation", False
     if "voice profile version mismatch" in message or "unknown tts voice slot" in message:
         return "VOICE_PROFILE_INVALID", "configuration", False
+    if "pro rendering is disabled" in message:
+        return "PRO_RENDER_DISABLED", "configuration", False
+    if "pro job" in message and ("voice" in message or "speaker_slot" in message):
+        return "PRO_VOICE_ASSIGNMENT_INVALID", "configuration", False
     if "reference wav" in message and "missing" in message:
         return "VOICE_REFERENCE_MISSING", "configuration", False
     if "dependencies are not installed" in message or "cuda is not available" in message:
@@ -87,6 +95,7 @@ class Worker:
         # another copy already holds this GPU, fail immediately with nothing
         # else left to tear down.
         self._lock = acquire_single_instance_lock(settings.work_dir / "worker.lock")
+        guard_remote_database(settings.database_url)
         self.settings = settings
         self.events = events
         self.repository = JobRepository(
@@ -98,6 +107,7 @@ class Worker:
         )
         self.storage = R2Storage(settings)
         self.voice_profiles = load_basic_voice_profiles(settings.voice_basic_path)
+        self.voice_render_settings = VoiceRenderSettingsStore(settings.voice_variants_path)
         self.narrator: VoxCpmNarrator | None = None
         self.running = True
 
@@ -144,12 +154,46 @@ class Worker:
                 time.sleep(self.settings.poll_seconds)
 
     def process(self, job: ClaimedJob) -> None:
+        try:
+            if job.voice_slot == "pro":
+                if not self.settings.pro_render_enabled:
+                    raise RuntimeError("Pro rendering is disabled (set TTS_PRO_RENDER_ENABLED=true only after approval)")
+                assignments = parse_voice_assignments(job.voice_assignments)
+                reference_paths = resolve_pro_block_references(self.settings.voice_variants_path, job.blocks, assignments)
+                narrator_reference = resolve_voice_reference(
+                    self.settings.voice_variants_path,
+                    voice_category=assignments[0].voice_category,
+                    voice_index=assignments[0].voice_index,
+                    voice_shared=assignments[0].voice_shared,
+                )
+                render_mode = "pro"
+            else:
+                voice = self.get_voice_profile(job)
+                reference_paths = [voice.reference_wav_path] * len(job.blocks)
+                narrator_reference = voice.reference_wav_path
+                render_mode = "basic"
+        except Exception as error:
+            error_message = f"{type(error).__name__}: {error}"
+            code, failure_stage, retryable = classify_failure(error)
+            LOGGER.error("job_rejected_before_render id=%s error=%s", job.id, error_message)
+            self.repository.fail(job, error_message, code=code, stage=failure_stage, retryable=retryable)
+            if self.events and self.events.on_job_failed:
+                self.events.on_job_failed(job.id, error_message, code)
+            return
+
+        # Reload once per job. A setting saved in the desktop app affects the
+        # next queued render without interrupting one in progress. In Pro mode
+        # the lead-in uses narrator timing and a trailing gap uses the voice
+        # that spoke that particular block.
+        narrator_timing = self.voice_render_settings.timing_for(narrator_reference)
+        block_timings = [self.voice_render_settings.timing_for(path) for path in reference_paths]
         # This is deliberately before workspace creation, manifest writes,
         # model loading, and voice validation.  An oversized request must not
         # consume GPU time, local disk, or R2 operations before it is rejected.
         planned_output_blocks = count_render_output_blocks(
             job.blocks,
             self.settings.max_chunk_chars,
+            inter_block_silence_seconds_by_block=[timing.inter_block_silence_seconds for timing in block_timings],
             stop_after=self.settings.max_output_blocks,
         )
         if planned_output_blocks > self.settings.max_output_blocks:
@@ -185,10 +229,10 @@ class Worker:
             output_dir.mkdir(parents=True, exist_ok=False)
             self.repository.prepare_block_manifest(job)
             narrator = self.get_narrator()
-            voice = self.get_voice_profile(job)
             LOGGER.info(
-                "job_started id=%s episode=%s slot=%s version=%s attempt=%s work_title=%r ep_name=%r ep_no=%s",
-                job.id, job.ep_id, job.voice_slot, job.voice_profile_version, job.attempt_count,
+                "job_started id=%s episode=%s slot=%s mode=%s version=%s attempt=%s lead_in=%.3f work_title=%r ep_name=%r ep_no=%s",
+                job.id, job.ep_id, job.voice_slot, render_mode, job.voice_profile_version, job.attempt_count,
+                narrator_timing.lead_in_seconds,
                 job.work_title, job.ep_name, job.ep_no,
             )
             if self.events and self.events.on_job_started:
@@ -196,6 +240,9 @@ class Worker:
             wav_paths: list[Path] = []
             block_durations: list[tuple[str, float]] = []
             total_blocks = len(job.blocks)
+            if narrator_timing.lead_in_seconds > 0:
+                wav_paths.append(output_dir / "intro.wav")
+                write_silence_wav(wav_paths[-1], narrator_timing.lead_in_seconds, narrator.sample_rate)
             for index, block in enumerate(job.blocks):
                 current_block_index = index
                 current_block = index + 1
@@ -208,13 +255,16 @@ class Worker:
                     raise RuntimeError("Job lease was lost or cancelled")
                 self.repository.mark_block_started(job, index)
                 duration = 0.0
+                reference_path = reference_paths[index]
+                block_timing = block_timings[index]
                 # Thai and English are intentionally retained. Other scripts are
                 # removed before inference so mixed test/import data cannot push
                 # unsupported text into the narrator model. Scene dividers and
                 # ellipses become real silence WAVs instead of being spoken or
                 # discarded, preserving the author's pacing in the final MP3.
                 output_index = 0
-                for segment in plan_tts_segments(block.tts_text or block.text, block.tts):
+                segments = plan_tts_segments(block.tts_text or block.text, block.tts)
+                for segment in segments:
                     if segment.text:
                         chunks = split_text(segment.text, self.settings.max_chunk_chars)
                         for chunk in chunks:
@@ -230,7 +280,7 @@ class Worker:
                                 raise RuntimeError("Job lease was lost, cancelled, or worker is shutting down")
                             wav_path = output_dir / f"{index:05d}-{output_index:03d}.wav"
                             stage = "synthesis"
-                            duration += write_wav(wav_path, narrator.synthesize(chunk, voice.reference_wav_path), narrator.sample_rate)
+                            duration += write_wav(wav_path, narrator.synthesize(chunk, reference_path), narrator.sample_rate)
                             wav_paths.append(wav_path)
                             output_index += 1
                     elif segment.silence_seconds > 0:
@@ -246,6 +296,14 @@ class Worker:
                         duration += write_silence_wav(wav_path, segment.silence_seconds, narrator.sample_rate)
                         wav_paths.append(wav_path)
                         output_index += 1
+                if should_add_inter_block_silence(
+                    segments, index, total_blocks, block_timing.inter_block_silence_seconds
+                ):
+                    wav_path = output_dir / f"{index:05d}-{output_index:03d}.wav"
+                    duration += write_silence_wav(
+                        wav_path, block_timing.inter_block_silence_seconds, narrator.sample_rate
+                    )
+                    wav_paths.append(wav_path)
                 block_durations.append((block.id, duration))
                 self.repository.complete_block(job, index, duration)
                 if not self.repository.update_progress(
@@ -257,12 +315,20 @@ class Worker:
                     raise RuntimeError("Job lease was lost or cancelled")
                 LOGGER.info("job_progress id=%s completed_blocks=%s total_blocks=%s", job.id, current_block, total_blocks)
             current_block_index = None
-            timestamps = timestamps_from_durations(block_durations)
+            timestamps = timestamps_from_durations(
+                block_durations, initial_offset_seconds=narrator_timing.lead_in_seconds
+            )
             if not wav_paths:
                 raise RuntimeError("No Thai or English text remained after TTS language filtering")
             output_mp3 = output_dir / "full.mp3"
             stage = "concatenate"
-            duration_seconds = concatenate_to_mp3(wav_paths, output_mp3, ffmpeg_path=self.settings.ffmpeg_path)
+            duration_seconds = concatenate_to_mp3(
+                wav_paths,
+                output_mp3,
+                ffmpeg_path=self.settings.ffmpeg_path,
+                output_sample_rate=self.settings.output_sample_rate,
+                mp3_bitrate_kbps=self.settings.output_mp3_bitrate_kbps,
+            )
             if duration_seconds <= 0:
                 raise RuntimeError("Concatenated episode audio has zero duration")
             stage = "upload"

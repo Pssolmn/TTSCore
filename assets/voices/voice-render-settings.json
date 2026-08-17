@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "voices": {
+    "Basic/Basic_female.wav": {
+      "lead_in_seconds": 0.18,
+      "inter_block_silence_seconds": 0.12
+    }
+  }
+}

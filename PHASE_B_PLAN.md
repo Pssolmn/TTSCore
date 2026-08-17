@@ -15,7 +15,7 @@
 
 เหตุผล: ไม่ว่า DB จริงๆ จะอยู่ที่ไหนในที่สุด (บ้านหรือ cloud) เครื่องที่รัน TTSCore/LLM จะอยู่คนละที่กับ `apps/api` เสมอ (ต่างเครือข่าย ข้าม internet) — ให้ worker ต่อ Postgres ตรงข้ามเครือข่ายแบบนี้ไม่ปลอดภัย (ต้อง expose DB port ออก public หรือพึ่ง VPN/tunnel ตลอดเวลา) และผูก credential เต็มสิทธิ์ไว้กับเครื่องที่อยู่นอกการควบคุมของ server หลัก
 
-นี่คือ "Phase B" ที่ร่างแนวคิดไว้คร่าวๆ แล้วใน `../Novel Platform/TTS_CORE_DESIGN.md` (หัวข้อ "แกนที่ 2: โครงสร้างเครือข่าย") — ไฟล์นี้ขยายรายละเอียดเพิ่มจากตอนคุยจริงจังรอบนี้
+นี่คือ "Phase B" ที่สรุปสถานะปัจจุบันไว้ใน `../Novel Platform/TTS_CORE_DESIGN.md` — ไฟล์นี้ขยายรายละเอียดการย้ายจาก Phase A เพิ่มจากภาพรวมนั้น
 
 ---
 
@@ -31,7 +31,7 @@
 | `mark_block_started()` / `complete_block()` / `mark_block_failed()` | อัปเดตสถานะราย block | เรียกถี่ (ทุก block) — ต้องคิดเรื่อง network latency สะสม |
 | `update_progress()` | อัปเดต progress + **ต่ออายุ lease** | เรียกถี่มาก (ทุก chunk ภายใน block ด้วย ไม่ใช่แค่ทุก block) — เป็นจุดที่กระทบ throughput มากที่สุดถ้าแต่ละครั้งมี HTTP round-trip แทรก ต้องวัด latency จริงก่อนสรุปว่าเรนเดอร์ช้าลงแค่ไหน |
 | `complete()` | บันทึกผลตอน job เสร็จ **พร้อมเช็ค content-hash** ว่า episode ไม่ถูกแก้ระหว่างเรนเดอร์ (ถ้าแก้แล้ว cancel งานทิ้งแทนทับข้อมูลใหม่) | ต้อง preserve safety check นี้ให้เป๊ะ — เป็น critical logic กันบั๊กข้อมูลเสีย ไม่ใช่แค่เขียนข้อมูลเข้า DB เฉยๆ |
-| `fail()` | retry with backoff (15/30/60/120/240/300s) หรือ fail ถาวรถ้าหมด attempt | ต้อง preserve backoff schedule เดิมเป๊ะ |
+| `fail()` | retry with backoff (15/30/60 วินาที) หรือ fail ถาวรถ้าหมด attempt | ต้อง preserve backoff schedule เดิมเป๊ะ |
 | `record_cleanup_failure()` | log เมื่อ cleanup R2 orphan ไม่สำเร็จ | ตรงไปตรงมา |
 
 ---

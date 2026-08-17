@@ -1,4 +1,5 @@
 [console_scripts]
+readji-tts-basic-preview = readji_tts.basic_preview:main
 readji-tts-gui = readji_tts.gui:main
 readji-tts-voice-design = readji_tts.voice_design:main
 readji-tts-worker = readji_tts.worker:main

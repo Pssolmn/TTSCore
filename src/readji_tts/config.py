@@ -14,6 +14,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 VOICE_SLOT_IDS = ("old_male", "young_male", "female")
 
 BASIC_VOICE_FOLDER_NAME = "Basic"
+BASIC_VOICE_FILE_PREFIX = "Basic_"
+SUPPORTED_OUTPUT_SAMPLE_RATES = frozenset({
+    8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000,
+})
 
 _BASIC_VOICE_LABELS: dict[str, str] = {
     "old_male": "ชายแก่",
@@ -62,12 +66,29 @@ class Settings(BaseSettings):
     worker_id: str = Field(default_factory=lambda: f"readji-tts-{socket.gethostname()}", alias="TTS_WORKER_ID")
     work_dir: Path = Field(default=Path("runtime"), alias="TTS_WORK_DIR")
     ffmpeg_path: str = Field(default="ffmpeg", alias="TTS_FFMPEG_PATH")
+    # Speech is mono.  32 kHz / 32 kbps is deliberately small for published
+    # narration; raise either value only when a particular delivery target
+    # needs more fidelity.
+    output_sample_rate: int = Field(default=32_000, alias="TTS_OUTPUT_SAMPLE_RATE")
+    output_mp3_bitrate_kbps: int = Field(default=32, ge=8, le=320, alias="TTS_OUTPUT_MP3_BITRATE_KBPS")
+    # Pro jobs can exist in the database before their local reference folders
+    # are populated. Keep the worker inert for that tier until an operator
+    # explicitly opts in after checking the files.
+    pro_render_enabled: bool = Field(default=False, alias="TTS_PRO_RENDER_ENABLED")
 
     @field_validator("device")
     @classmethod
     def cuda_only(cls, value: str) -> str:
         if value != "cuda":
             raise ValueError("TTS_DEVICE must be cuda; CPU rendering is intentionally unsupported")
+        return value
+
+    @field_validator("output_sample_rate")
+    @classmethod
+    def supported_output_sample_rate(cls, value: int) -> int:
+        if value not in SUPPORTED_OUTPUT_SAMPLE_RATES:
+            allowed = ", ".join(str(rate) for rate in sorted(SUPPORTED_OUTPUT_SAMPLE_RATES))
+            raise ValueError(f"TTS_OUTPUT_SAMPLE_RATE must be one of: {allowed}")
         return value
 
     @field_validator("r2_public_url")
@@ -105,6 +126,32 @@ def describe_database_target(database_url: str) -> str:
     return f"{parsed.scheme}://{host}{port}/{database}"
 
 
+_LOCAL_DATABASE_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def guard_remote_database(database_url: str) -> None:
+    """Refuse to claim/render jobs against a non-local database unless confirmed.
+
+    Phase A (see PHASE_B_PLAN.md) connects straight to Postgres with full
+    credentials -- a stray or stale DATABASE_URL pointing at Railway/production
+    is a real way for this local machine to start claiming and rendering live
+    jobs by accident (this exact class of bug already happened once with a
+    different service's DATABASE_URL during dev). TTS_CONFIRM_REMOTE=1 is the
+    deliberate escape hatch for when a non-local target really is the intent
+    (e.g. this machine has become the production renderer).
+    """
+    host = (urlsplit(database_url).hostname or "").lower()
+    if host in _LOCAL_DATABASE_HOSTS:
+        return
+    if os.environ.get("TTS_CONFIRM_REMOTE") == "1":
+        return
+    target = describe_database_target(database_url)
+    raise RuntimeError(
+        f"Refusing to start: DATABASE_URL targets a non-local database ({target}). "
+        "If this is intentional, set TTS_CONFIRM_REMOTE=1 in your .env to confirm."
+    )
+
+
 def load_settings(*, require_master_voice: bool = False) -> Settings:
     local_env_file = resolve_env_file()
     settings = Settings(_env_file=local_env_file)
@@ -132,8 +179,9 @@ def load_basic_voice_profiles(basic_dir: Path) -> dict[str, VoiceProfile]:
     """Load the fixed 3-slot Basic-tier render voices from a real folder on disk.
 
     Basic tier always renders a single narrator voice; the file for each slot
-    lives at ``{basic_dir}/{slot}.wav``. version is hardcoded to "v1" here: it
-    is a cross-repo contract with apps/api's TTS_VOICE_PROFILE_VERSION, and a
+    lives at ``{basic_dir}/{BASIC_VOICE_FILE_PREFIX}{slot}.wav`` (e.g.
+    ``Basic_female.wav``). version is hardcoded to "v1" here: it is a
+    cross-repo contract with apps/api's TTS_VOICE_PROFILE_VERSION, and a
     mismatch fails every render job's version check.
     """
     resolved_dir = basic_dir.resolve()
@@ -142,7 +190,7 @@ def load_basic_voice_profiles(basic_dir: Path) -> dict[str, VoiceProfile]:
 
     profiles: dict[str, VoiceProfile] = {}
     for slot in VOICE_SLOT_IDS:
-        reference_wav_path = resolved_dir / f"{slot}.wav"
+        reference_wav_path = resolved_dir / f"{BASIC_VOICE_FILE_PREFIX}{slot}.wav"
         if not reference_wav_path.is_file():
             raise RuntimeError(f"Reference WAV for TTS voice slot {slot} is missing: {reference_wav_path}")
         profiles[slot] = VoiceProfile(

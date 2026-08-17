@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 
-from .config import Settings
+
+
+class VoiceSynthesisSettings(Protocol):
+    """The small configuration surface VoxCPM needs for local synthesis."""
+
+    model_id: str
+    device: str
+    load_denoiser: bool
+    optimize: bool
+    cfg_value: float
+    inference_timesteps: int
+    badcase_max_attempts: int
 
 
 class VoxCpmNarrator:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: VoiceSynthesisSettings) -> None:
         try:
             import torch
             from voxcpm import VoxCPM

@@ -193,7 +193,7 @@ class JobRepository:
                     FROM next_job
                     WHERE job.id = next_job.id
                     RETURNING job.id, job.ep_id, job.request_id, job.voice_slot, job.voice_profile_version,
-                              job.source_hash, job.attempt_count, job.max_attempts, next_job.previous_status
+                              job.source_hash, job.voice_assignments, job.attempt_count, job.max_attempts, next_job.previous_status
                     """,
                     {"worker_id": self.worker_id, "lease_seconds": self.lease_seconds},
                 )
@@ -258,6 +258,7 @@ class JobRepository:
                     attempt_count=int(job["attempt_count"]),
                     max_attempts=int(job["max_attempts"]),
                     blocks=[NovelBlock.from_db(item) for item in raw_blocks],
+                    voice_assignments=job.get("voice_assignments"),
                     work_title=episode.get("work_title"),
                     ep_name=episode.get("ep_name"),
                     ep_no=int(ep_no) if ep_no is not None else None,
