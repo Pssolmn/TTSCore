@@ -12,8 +12,8 @@ been explicitly approved.
 
 - Windows with NVIDIA driver and CUDA-capable GPU (the current RTX 4060 runs one sequential worker)
 - Python 3.10–3.12, ffmpeg available in `PATH`
-- Running PostgreSQL from `Novel Platform/docker-compose.yml`
-- Cloudflare R2 credentials with object read/write permission for the Readji media bucket
+- PostgreSQL used by the corresponding Novel Platform deployment
+- Cloudflare R2 credentials with object read/write permission for that deployment's media bucket
 
 ## Install
 
@@ -27,7 +27,33 @@ python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 ```
 
-For the current local Phase A setup, the worker automatically reads the existing `Novel Platform/apps/api/.env` if `TTSCore/.env` does not exist, so database/R2 secrets are not duplicated. Production deployments should provide a dedicated `.env` (or `TTS_ENV_FILE`).
+Every worker deployment owns its own `.env` (or `TTS_ENV_FILE`). It never reads
+credentials from a sibling Novel Platform checkout. This keeps a local test,
+your own instance, and a customer's instance fully separate.
+
+## Configuration and R2 connection
+
+`.env.example` is the complete safe template for the worker. It contains only
+placeholders and may be committed; `.env` contains real credentials and is
+ignored. The worker needs these connections before it can claim a job:
+
+- `DATABASE_URL` — the PostgreSQL database used by the Novel Platform API
+- `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
+  `R2_BUCKET_NAME`, and `R2_PUBLIC_URL` — Cloudflare R2 for final audio
+
+Create the R2 key with read/write access to the customer's bucket only. The
+worker and its corresponding API must use the same customer R2 values so the
+API can publish the audio the worker uploads. Do not place R2 keys, database
+passwords, JWT secrets, or payment secrets in Web/Admin
+`NEXT_PUBLIC_*` variables: those values are delivered to every browser.
+
+For a dedicated production worker, copy `.env.example` to a private file such
+as `.env.production`, set `TTS_ENV_FILE=.env.production` for its service, and
+provide the real values through the server's secret manager. The worker
+refuses a non-local `DATABASE_URL` unless `TTS_CONFIRM_REMOTE=1` is also set;
+this is a deliberate confirmation that it may claim production jobs. Keep
+`TTS_PRO_RENDER_ENABLED=false` until the Pro reference folders and a small
+end-to-end render have been approved.
 
 ## Reader voice slots (Basic tier)
 
@@ -112,7 +138,7 @@ The first run downloads `openbmb/VoxCPM2`. A worker does not process any job wit
 
 The local GPU machine is already configured with Python 3.11, CUDA 12.8, VoxCPM2 weights, the neutral master narrator, PostgreSQL/R2 connectivity, and a `ReadjiTtsWorker` Windows Scheduled Task. Its durable log is `runtime/worker.log`. Do not run a second copy of the worker on this same GPU.
 
-Before a public deployment, rotate the existing development database/R2 secrets (see `Novel Platform/KNOWN_ISSUES.md`) and supply those new values through a dedicated worker environment file when the worker is moved off this machine.
+Before a public deployment, rotate the existing development database/R2 secrets and supply those new values through a dedicated worker environment file when the worker is moved off this machine.
 
 ## End-to-end smoke test
 

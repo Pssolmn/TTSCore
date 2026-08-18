@@ -102,19 +102,15 @@ class Settings(BaseSettings):
 
 
 def resolve_env_file() -> Path:
-    """Resolve which .env file load_settings() will read, without loading it.
+    """Resolve this worker deployment's .env file, without loading it.
 
-    The GUI's read-only Settings view needs this exact same fallback so what
-    it shows/opens always matches what the running process actually loaded.
+    The worker must never borrow credentials from the sibling Novel Platform
+    checkout.  That prevented a clean customer handoff and could make one
+    deployment claim another deployment's jobs.  The GUI uses this same
+    resolver so the displayed file always matches the running process.
     """
     configured_env_file = os.environ.get("TTS_ENV_FILE")
-    local_env_file = Path(configured_env_file) if configured_env_file else Path(".env")
-    # During the current Phase A setup the worker shares a private machine with
-    # apps/api. Reusing its environment avoids duplicating database/R2 secrets.
-    # A dedicated TTS_ENV_FILE or local .env always takes precedence for deploys.
-    if not local_env_file.is_file() and not configured_env_file:
-        local_env_file = Path(__file__).resolve().parents[3] / "Novel Platform" / "apps" / "api" / ".env"
-    return local_env_file
+    return Path(configured_env_file) if configured_env_file else Path(".env")
 
 
 def describe_database_target(database_url: str) -> str:
