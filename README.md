@@ -55,6 +55,28 @@ this is a deliberate confirmation that it may claim production jobs. Keep
 `TTS_PRO_RENDER_ENABLED=false` until the Pro reference folders and a small
 end-to-end render have been approved.
 
+## R2 upload quota
+
+TTSCore has a local, durable guard against filling R2 with **new** generated
+audio. On its first start after this feature is installed, it creates
+`runtime/r2-upload-quota.json`, turns the guard **on**, and sets its initial
+limit to **6 GB**. The counter starts at zero at that moment: it does not scan
+or count any object that was already in the bucket.
+
+Open **ตั้งค่า** → **จำกัดพื้นที่ R2 สำหรับเสียง TTS ใหม่** to turn it on/off
+or change the GB value. Before each MP3 upload, the worker reserves that
+file's real byte size. If it would exceed the remaining allowance, nothing is
+uploaded and the job fails once as `R2_UPLOAD_QUOTA_EXCEEDED`; after changing
+the quota, retry that job from Admin. Failed uploads and successfully deleted
+stale uploads return their reserved bytes. A crash after R2 accepts an object
+keeps the reservation counted conservatively.
+
+The record applies to one worker installation. The intended deployment runs a
+single manual worker. If multiple machines are deliberately pointed at the
+same bucket, give them separate smaller allowances or set
+`TTS_R2_UPLOAD_QUOTA_STATE_PATH` to one shared mounted file; independent local
+records cannot enforce one combined bucket cap.
+
 ## Reader voice slots (Basic tier)
 
 Basic-tier chapters are always rendered with a single narrator voice, one of three fixed reader-facing slots: `old_male` (ชายแก่), `young_male` (หนุ่มน้อย), and `female` (คุณผู้หญิง). The source WAV for each slot is a real file on disk at `assets/voices/Basic/Basic_<slot>.wav` -- there is no config file to edit. To replace a voice, place the legally usable WAV directly at that path before queuing new renders. The profile version is hardcoded to `v1` in `load_basic_voice_profiles()`; every render has a unique job ID in its R2 key, so it is safe to replace a source file without changing reader slot names or releasing the frontend.

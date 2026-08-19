@@ -4795,3 +4795,5 @@ Traceback (most recent call last):
   File "C:\Users\SEESO\Documents\Web dev\TTSCore\src\readji_tts\instance_lock.py", line 48, in acquire_single_instance_lock
     raise AlreadyRunningError(
 readji_tts.instance_lock.AlreadyRunningError: Another copy of the Readji TTS worker is already using this machine's GPU.
+2026-08-19 01:00:07,492 INFO readji_tts r2_upload_quota_saved enabled=True limit_bytes=6442450944 used_bytes=0 path=runtime\r2-upload-quota.json
+2026-08-19 01:45:49,499 INFO readji_tts shutdown_requested

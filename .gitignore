@@ -4,3 +4,5 @@
 __pycache__/
 *.pyc
 desktop.ini
+runtime/r2-upload-quota.json
+runtime/r2-upload-quota.json.lock

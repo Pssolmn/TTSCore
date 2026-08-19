@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # needs more fidelity.
     output_sample_rate: int = Field(default=32_000, alias="TTS_OUTPUT_SAMPLE_RATE")
     output_mp3_bitrate_kbps: int = Field(default=32, ge=8, le=320, alias="TTS_OUTPUT_MP3_BITRATE_KBPS")
+    # This must be explicit before a local GPU worker is allowed to claim a
+    # non-local database's jobs. It deliberately lives in the worker's own
+    # private .env, not in a frontend/API environment.
+    remote_database_confirmed: bool = Field(default=False, alias="TTS_CONFIRM_REMOTE")
+    # State is deliberately local and starts at zero when first created. It
+    # limits only future TTSCore audio uploads, never scans/counts old R2 data.
+    r2_upload_quota_state_path: Path | None = Field(default=None, alias="TTS_R2_UPLOAD_QUOTA_STATE_PATH")
     # Pro jobs can exist in the database before their local reference folders
     # are populated. Keep the worker inert for that tier until an operator
     # explicitly opts in after checking the files.
@@ -100,6 +107,10 @@ class Settings(BaseSettings):
     def voice_basic_path(self) -> Path:
         return self.voice_variants_path / BASIC_VOICE_FOLDER_NAME
 
+    @property
+    def r2_upload_quota_path(self) -> Path:
+        return self.r2_upload_quota_state_path or self.work_dir / "r2-upload-quota.json"
+
 
 def resolve_env_file() -> Path:
     """Resolve this worker deployment's .env file, without loading it.
@@ -125,7 +136,7 @@ def describe_database_target(database_url: str) -> str:
 _LOCAL_DATABASE_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
-def guard_remote_database(database_url: str) -> None:
+def guard_remote_database(database_url: str, *, confirmed: bool = False) -> None:
     """Refuse to claim/render jobs against a non-local database unless confirmed.
 
     Phase A (see PHASE_B_PLAN.md) connects straight to Postgres with full
@@ -139,7 +150,9 @@ def guard_remote_database(database_url: str) -> None:
     host = (urlsplit(database_url).hostname or "").lower()
     if host in _LOCAL_DATABASE_HOSTS:
         return
-    if os.environ.get("TTS_CONFIRM_REMOTE") == "1":
+    # Keep the process-environment form for existing service launchers, but
+    # also honour Settings so TTS_CONFIRM_REMOTE=1 in the worker's .env works.
+    if confirmed or os.environ.get("TTS_CONFIRM_REMOTE") == "1":
         return
     target = describe_database_target(database_url)
     raise RuntimeError(

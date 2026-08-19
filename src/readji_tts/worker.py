@@ -29,6 +29,7 @@ from .db import JobRepository
 from .instance_lock import acquire_single_instance_lock
 from .provider import VoxCpmNarrator
 from .r2 import R2Storage
+from .r2_upload_quota import R2UploadQuotaError, R2UploadQuotaExceeded, R2UploadReservation
 from .schemas import ClaimedJob
 from .voice_render_settings import VoiceRenderSettingsStore
 from .voice_plan import parse_voice_assignments, resolve_pro_block_references
@@ -70,6 +71,13 @@ def classify_failure(error: Exception) -> tuple[str, str, bool]:
         return "WORKER_CONFIGURATION", "configuration", False
     if "out of memory" in message or "cuda oom" in message:
         return "CUDA_OUT_OF_MEMORY", "synthesis", True
+    if isinstance(error, R2UploadQuotaExceeded):
+        # Retrying cannot free bytes. An operator must increase/disable the
+        # cap or delete stale R2 data, then choose Retry from Admin.
+        return "R2_UPLOAD_QUOTA_EXCEEDED", "upload", False
+    if isinstance(error, R2UploadQuotaError):
+        # A broken local record is a safety issue, not a transient R2 error.
+        return "R2_UPLOAD_QUOTA_CONFIGURATION_ERROR", "upload", False
     if isinstance(error, subprocess.CalledProcessError):
         return "FFMPEG_FAILED", "concatenate", True
     if isinstance(error, (BotoCoreError, ClientError)):
@@ -95,7 +103,7 @@ class Worker:
         # another copy already holds this GPU, fail immediately with nothing
         # else left to tear down.
         self._lock = acquire_single_instance_lock(settings.work_dir / "worker.lock")
-        guard_remote_database(settings.database_url)
+        guard_remote_database(settings.database_url, confirmed=settings.remote_database_confirmed)
         self.settings = settings
         self.events = events
         self.repository = JobRepository(
@@ -223,6 +231,7 @@ class Worker:
         output_dir = self.settings.work_dir / f"job-{job.id}-attempt-{job.attempt_count}"
         audio_key: str | None = None
         uploaded = False
+        upload_reservation: R2UploadReservation | None = None
         current_block_index: int | None = None
         stage = "prepare"
         try:
@@ -333,7 +342,7 @@ class Worker:
                 raise RuntimeError("Concatenated episode audio has zero duration")
             stage = "upload"
             audio_key = self.storage.audio_key(job.ep_id, job.voice_slot, job.voice_profile_version, job.id, job.attempt_count)
-            self.storage.upload_mp3(audio_key, output_mp3)
+            upload_reservation = self.storage.upload_mp3(audio_key, output_mp3)
             uploaded = True
             stage = "commit"
             committed = self.repository.complete(
@@ -344,23 +353,39 @@ class Worker:
                 timestamps=timestamps,
             )
             if not committed:
+                deleted = False
                 try:
                     self.storage.delete(audio_key)
+                    deleted = True
                 except Exception as cleanup_error:
                     self.repository.record_cleanup_failure(job, f"{type(cleanup_error).__name__}: {cleanup_error}")
+                if deleted:
+                    self.storage.release_upload_quota(upload_reservation)
                 uploaded = False
                 LOGGER.info("job_discarded_stale_or_cancelled id=%s", job.id)
                 return
+            try:
+                self.storage.confirm_upload(upload_reservation)
+            except Exception:
+                # DB and R2 are already committed. Keep the original pending
+                # reservation (it still counts) and never delete good audio
+                # merely because the local audit-history update failed.
+                LOGGER.exception("r2_upload_quota_confirmation_failed job=%s", job.id)
             LOGGER.info("job_completed id=%s episode=%s slot=%s duration=%.3f", job.id, job.ep_id, job.voice_slot, duration_seconds)
             if self.events and self.events.on_job_completed:
                 self.events.on_job_completed(job.id, duration_seconds)
         except Exception as error:
             if uploaded and audio_key is not None:
+                deleted = False
                 try:
                     self.storage.delete(audio_key)
+                    deleted = True
                 except Exception as cleanup_error:
                     with suppress(Exception):
                         self.repository.record_cleanup_failure(job, f"{type(cleanup_error).__name__}: {cleanup_error}")
+                if deleted:
+                    with suppress(Exception):
+                        self.storage.release_upload_quota(upload_reservation)
             error_message = f"{type(error).__name__}: {error}"
             code, classified_stage, retryable = classify_failure(error)
             # Preserve a caller-supplied stage when it is more specific than

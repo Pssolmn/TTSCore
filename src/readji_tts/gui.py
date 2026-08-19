@@ -14,6 +14,7 @@ from tkinter.scrolledtext import ScrolledText
 
 from .config import Settings, describe_database_target, load_basic_voice_profiles, load_settings, resolve_env_file
 from .instance_lock import AlreadyRunningError
+from .r2_upload_quota import BYTES_PER_GIB, R2UploadQuotaStore, R2UploadQuotaStatus
 from .scheduled_task import get_boot_task_state, set_boot_task_state
 from .schemas import ClaimedJob
 from .voice_render_settings import DEFAULT_TIMING, VoiceRenderSettingsStore, VoiceRenderTiming, scan_voice_reference_files
@@ -315,7 +316,7 @@ class ReadjiTtsGui:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("ตั้งค่า")
-        dialog.geometry("700x760")
+        dialog.geometry("700x820")
         dialog.minsize(620, 560)
         dialog.transient(self.root)
 
@@ -374,6 +375,8 @@ class ReadjiTtsGui:
         boot_row.pack(fill=tk.X, pady=(0, 8))
         self._build_boot_toggle_row(boot_row)
 
+        self._build_r2_upload_quota_editor(outer)
+
         self._build_voice_timing_editor(outer, tree)
 
         # ส่วนที่ 4 (ต่อ): pack Variant Tray ท้ายสุด ให้มันยืดรับพื้นที่ที่เหลือ
@@ -403,6 +406,7 @@ class ReadjiTtsGui:
             ("Work dir", str(settings.work_dir)),
             ("ffmpeg path", settings.ffmpeg_path),
             ("Published audio", f"MP3 mono · {settings.output_sample_rate / 1_000:g} kHz · {settings.output_mp3_bitrate_kbps} kbps"),
+            ("R2 upload quota state", str(settings.r2_upload_quota_path)),
             ("Basic voice folder", str(settings.voice_basic_path)),
             ("Voice variants folder", str(settings.voice_variants_path)),
             (".env in use", str(resolve_env_file())),
@@ -460,6 +464,77 @@ class ReadjiTtsGui:
         checkbox.pack(side=tk.LEFT)
         ttk.Label(parent, textvariable=status_var).pack(side=tk.LEFT, padx=(8, 0))
         refresh_state()
+
+    def _build_r2_upload_quota_editor(self, parent: ttk.Frame) -> None:
+        settings = self._current_settings()
+        if settings is None:
+            return
+        store = R2UploadQuotaStore(settings.r2_upload_quota_path)
+        frame = ttk.LabelFrame(parent, text="จำกัดพื้นที่ R2 สำหรับเสียง TTS ใหม่")
+        frame.pack(fill=tk.X, pady=(0, 8))
+        enabled_var = tk.BooleanVar()
+        limit_gib_var = tk.StringVar()
+        status_var = tk.StringVar()
+
+        def format_status(status: R2UploadQuotaStatus) -> str:
+            used = status.used_bytes / BYTES_PER_GIB
+            limit = status.limit_bytes / BYTES_PER_GIB
+            remaining = status.remaining_bytes / BYTES_PER_GIB
+            pending = status.pending_bytes / BYTES_PER_GIB
+            state = "เปิดอยู่" if status.enabled else "ปิดอยู่"
+            pending_text = f" · กำลังจอง {pending:.2f} GB" if pending > 0 else ""
+            return f"{state} · ใช้ไป {used:.2f}/{limit:.2f} GB · เหลือ {remaining:.2f} GB · เริ่มนับ {status.started_at}{pending_text}"
+
+        def refresh() -> None:
+            try:
+                status = store.status()
+            except Exception as error:
+                status_var.set(f"อ่าน quota ไม่สำเร็จ: {error}")
+                return
+            enabled_var.set(status.enabled)
+            limit_gib_var.set(f"{status.limit_bytes / BYTES_PER_GIB:.2f}".rstrip("0").rstrip("."))
+            status_var.set(format_status(status))
+            limit_spinbox.configure(state=tk.NORMAL if status.enabled else tk.DISABLED)
+
+        def update_input_state() -> None:
+            limit_spinbox.configure(state=tk.NORMAL if enabled_var.get() else tk.DISABLED)
+
+        def save() -> None:
+            try:
+                limit_gib = float(limit_gib_var.get())
+                if limit_gib <= 0:
+                    raise ValueError
+                status = store.configure(enabled=enabled_var.get(), limit_bytes=round(limit_gib * BYTES_PER_GIB))
+            except ValueError:
+                messagebox.showerror("บันทึก quota ไม่สำเร็จ", "ระบุขนาดเป็นตัวเลขมากกว่า 0 GB")
+                return
+            except RuntimeError as error:
+                messagebox.showerror("บันทึก quota ไม่สำเร็จ", str(error))
+                return
+            status_var.set(format_status(status))
+            update_input_state()
+            WORKER_LOGGER.info(
+                "r2_upload_quota_saved enabled=%s limit_bytes=%s used_bytes=%s path=%s",
+                status.enabled,
+                status.limit_bytes,
+                status.used_bytes,
+                settings.r2_upload_quota_path,
+            )
+            messagebox.showinfo("จำกัดพื้นที่ R2", "บันทึกแล้ว มีผลกับการอัปโหลด MP3 งานถัดไป")
+
+        ttk.Checkbutton(
+            frame,
+            text="เปิดใช้ quota (นับเฉพาะไฟล์ MP3 ใหม่หลังจากเริ่มบันทึกนี้)",
+            variable=enabled_var,
+            command=update_input_state,
+        ).grid(row=0, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(6, 4))
+        ttk.Label(frame, text="ขีดจำกัด").grid(row=1, column=0, sticky=tk.W, padx=(8, 4), pady=(0, 4))
+        limit_spinbox = ttk.Spinbox(frame, from_=0.1, to=10240, increment=0.1, width=10, textvariable=limit_gib_var)
+        limit_spinbox.grid(row=1, column=1, sticky=tk.W, pady=(0, 4))
+        ttk.Label(frame, text="GB").grid(row=1, column=2, sticky=tk.W, padx=(4, 8), pady=(0, 4))
+        ttk.Button(frame, text="บันทึก quota", command=save).grid(row=1, column=3, sticky=tk.W, pady=(0, 4))
+        ttk.Label(frame, textvariable=status_var, wraplength=640).grid(row=2, column=0, columnspan=4, sticky=tk.W, padx=8, pady=(0, 6))
+        refresh()
 
     def _build_variant_tree(self, parent: ttk.LabelFrame) -> ttk.Treeview:
         # Treeview row height เป็น style option แยกต่างหากจาก named font ที่
