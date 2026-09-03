@@ -168,18 +168,65 @@ class JobRepository:
                         message="Worker lease expired after the final permitted attempt",
                     )
                     self._refresh_request_status(cursor, int(expired["request_id"]))
+
+                # A queued render is no longer valid after its episode or work
+                # is soft-deleted.  The API normally cancels it in the same
+                # transaction as deletion; this DB-side guard also handles old
+                # data and deletions performed outside the API.
+                cursor.execute(
+                    """
+                    UPDATE tts_jobs AS job
+                    SET status = 'cancelled', failure_code = 'SOURCE_DELETED', failure_stage = 'validation',
+                        retryable = FALSE, error_message = 'Episode or work was deleted before render',
+                        cancelled_at = now(), lease_expires_at = NULL, current_block = NULL, updated_at = now()
+                    FROM work_ep AS ep
+                    JOIN works AS work ON work.p_id = ep.p_id
+                    WHERE job.ep_id = ep.ep_id
+                      AND job.request_id IS NOT NULL
+                      AND job.status IN ('pending', 'processing')
+                      AND (ep.status <> 'active' OR work.status <> 'active')
+                    RETURNING job.id, job.request_id
+                    """
+                )
+                deleted_source_jobs = cursor.fetchall()
+                if deleted_source_jobs:
+                    cursor.execute(
+                        """
+                        UPDATE tts_job_blocks
+                        SET status = 'cancelled', error_code = 'SOURCE_DELETED',
+                            error_message = 'Episode or work was deleted before render', updated_at = now()
+                        WHERE job_id = ANY(%s) AND status IN ('pending', 'processing')
+                        """,
+                        ([int(item["id"]) for item in deleted_source_jobs],),
+                    )
+                for cancelled in deleted_source_jobs:
+                    request_id = int(cancelled["request_id"])
+                    self._record_event(
+                        cursor,
+                        job_id=int(cancelled["id"]),
+                        request_id=request_id,
+                        event_type="cancelled",
+                        severity="warning",
+                        code="SOURCE_DELETED",
+                        message="Render cancelled because its episode or work was deleted",
+                    )
+                    self._refresh_request_status(cursor, request_id)
                 cursor.execute(
                     """
                     WITH next_job AS (
-                      SELECT id, status AS previous_status
-                      FROM tts_jobs
-                      WHERE request_id IS NOT NULL
-                        AND ((status = 'pending' AND available_at <= now())
-                         OR (status = 'processing' AND lease_expires_at < now())
+                      SELECT candidate.id, candidate.status AS previous_status
+                      FROM tts_jobs AS candidate
+                      JOIN work_ep AS ep ON ep.ep_id = candidate.ep_id
+                      JOIN works AS work ON work.p_id = ep.p_id
+                      WHERE candidate.request_id IS NOT NULL
+                        AND ep.status = 'active'
+                        AND work.status = 'active'
+                        AND ((candidate.status = 'pending' AND candidate.available_at <= now())
+                         OR (candidate.status = 'processing' AND candidate.lease_expires_at < now())
                         )
-                        AND attempt_count < max_attempts
-                      ORDER BY priority DESC, requested_at
-                      FOR UPDATE SKIP LOCKED
+                        AND candidate.attempt_count < candidate.max_attempts
+                      ORDER BY candidate.priority DESC, candidate.requested_at
+                      FOR UPDATE OF candidate SKIP LOCKED
                       LIMIT 1
                     )
                     UPDATE tts_jobs AS job
@@ -276,7 +323,7 @@ class JobRepository:
                 job.id,
                 block.id,
                 index,
-                hashlib.sha256((block.tts_text or block.text).encode("utf-8")).hexdigest(),
+                hashlib.sha256(block.synthesis_text.encode("utf-8")).hexdigest(),
             )
             for index, block in enumerate(job.blocks)
         ]
@@ -378,10 +425,11 @@ class JobRepository:
             with self.connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT ep_content
-                    FROM work_ep
-                    WHERE ep_id = %s
-                    FOR UPDATE
+                    SELECT ep.ep_content
+                    FROM work_ep AS ep
+                    JOIN works AS work ON work.p_id = ep.p_id
+                    WHERE ep.ep_id = %s AND ep.status = 'active' AND work.status = 'active'
+                    FOR UPDATE OF ep
                     """,
                     (job.ep_id,),
                 )

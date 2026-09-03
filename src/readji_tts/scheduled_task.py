@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import csv
-import io
 import subprocess
 from typing import Literal
 
@@ -32,20 +30,40 @@ def _run_schtasks(args: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
+
+def _powershell_literal(value: str) -> str:
+    """Return a non-interpolating PowerShell string literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
 def get_boot_task_state(task_name: str = TASK_NAME) -> BootTaskState:
-    result = _run_schtasks(["/Query", "/TN", task_name, "/FO", "CSV", "/NH"])
+    # schtasks.exe reports both "not found" and Disabled using localized text,
+    # which made this checkbox fail on a Thai customer installation. Emit one
+    # of our own stable tokens from the Windows ScheduledTasks API instead.
+    name = _powershell_literal(task_name)
+    result = _run_powershell(
+        f"$task = Get-ScheduledTask -TaskName {name} -ErrorAction SilentlyContinue; "
+        "if ($null -eq $task) { 'not_found' } "
+        "elseif ($task.State -eq 'Disabled') { 'disabled' } "
+        "else { 'enabled' }"
+    )
     if result.returncode != 0:
-        # schtasks gives no structured "not found" exit code via CSV, only
-        # this human-readable stderr line. Accepted as-is: this project is
-        # already Windows-only, single-machine, with no localization need.
-        if "cannot find the file specified" in (result.stderr or "").casefold():
-            return "not_found"
-        raise RuntimeError(f"schtasks query failed: {result.stderr or result.stdout}")
-    rows = list(csv.reader(io.StringIO(result.stdout)))
-    if not rows or not rows[0]:
-        raise RuntimeError(f"schtasks query returned no data for task {task_name!r}")
-    status = rows[0][-1].strip()
-    return "disabled" if status.casefold() == "disabled" else "enabled"
+        raise RuntimeError(f"Scheduled Task query failed: {result.stderr or result.stdout}")
+    state = (result.stdout or "").strip()
+    if state not in {"enabled", "disabled", "not_found"}:
+        raise RuntimeError(f"Scheduled Task query returned invalid state for {task_name!r}: {state!r}")
+    return state  # type: ignore[return-value]
 
 
 def set_boot_task_state(enabled: bool, task_name: str = TASK_NAME) -> None:

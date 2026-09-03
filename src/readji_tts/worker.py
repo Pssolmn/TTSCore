@@ -99,29 +99,48 @@ def configure_logging(log_file: Path) -> None:
 
 class Worker:
     def __init__(self, settings: Settings, *, events: WorkerEvents | None = None) -> None:
-        # First statement, before the DB/R2 connections are even opened: if
-        # another copy already holds this GPU, fail immediately with nothing
-        # else left to tear down.
-        self._lock = acquire_single_instance_lock(settings.work_dir / "worker.lock")
+        # Validate the target before acquiring any machine resource. A typo in
+        # the environment must not leave the GUI looking "already running".
         guard_remote_database(settings.database_url, confirmed=settings.remote_database_confirmed)
+        instance_lock = acquire_single_instance_lock(settings.work_dir / "worker.lock")
+        repository: JobRepository | None = None
+        try:
+            repository = JobRepository(
+                settings.database_url,
+                settings.worker_id,
+                settings.lease_seconds,
+                on_activity=events.on_activity if events else None,
+                on_progress=events.on_progress if events else None,
+            )
+            storage = R2Storage(settings)
+            voice_profiles = load_basic_voice_profiles(settings.voice_basic_path)
+            voice_render_settings = VoiceRenderSettingsStore(settings.voice_variants_path)
+        except Exception:
+            if repository is not None:
+                repository.close()
+            instance_lock.release()
+            raise
+
+        assert repository is not None
+        self._lock = instance_lock
+        self._closed = False
         self.settings = settings
         self.events = events
-        self.repository = JobRepository(
-            settings.database_url,
-            settings.worker_id,
-            settings.lease_seconds,
-            on_activity=events.on_activity if events else None,
-            on_progress=events.on_progress if events else None,
-        )
-        self.storage = R2Storage(settings)
-        self.voice_profiles = load_basic_voice_profiles(settings.voice_basic_path)
-        self.voice_render_settings = VoiceRenderSettingsStore(settings.voice_variants_path)
+        self.repository = repository
+        self.storage = storage
+        self.voice_profiles = voice_profiles
+        self.voice_render_settings = voice_render_settings
         self.narrator: VoxCpmNarrator | None = None
         self.running = True
 
     def close(self) -> None:
-        self.repository.close()
-        self._lock.release()
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.repository.close()
+        finally:
+            self._lock.release()
 
     def stop(self, *_: object) -> None:
         LOGGER.info("shutdown_requested")
@@ -193,8 +212,9 @@ class Worker:
         # next queued render without interrupting one in progress. In Pro mode
         # the lead-in uses narrator timing and a trailing gap uses the voice
         # that spoke that particular block.
-        narrator_timing = self.voice_render_settings.timing_for(narrator_reference)
-        block_timings = [self.voice_render_settings.timing_for(path) for path in reference_paths]
+        all_timings = self.voice_render_settings.timings_for([narrator_reference, *reference_paths])
+        narrator_timing = all_timings[0]
+        block_timings = all_timings[1:]
         # This is deliberately before workspace creation, manifest writes,
         # model loading, and voice validation.  An oversized request must not
         # consume GPU time, local disk, or R2 operations before it is rejected.
@@ -272,7 +292,7 @@ class Worker:
                 # ellipses become real silence WAVs instead of being spoken or
                 # discarded, preserving the author's pacing in the final MP3.
                 output_index = 0
-                segments = plan_tts_segments(block.tts_text or block.text, block.tts)
+                segments = plan_tts_segments(block.synthesis_text, block.tts)
                 for segment in segments:
                     if segment.text:
                         chunks = split_text(segment.text, self.settings.max_chunk_chars)

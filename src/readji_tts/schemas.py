@@ -15,6 +15,16 @@ class NovelBlock:
     tts_text: str | None = None
     tts: dict[str, Any] | None = None
 
+    @property
+    def synthesis_text(self) -> str:
+        """Text sent to TTS, preserving an intentional empty override.
+
+        ``tts_text=None`` means "use the reader text". An explicit empty
+        string means "speak nothing" and must never fall back through Python's
+        truthiness rules to the reader-facing text.
+        """
+        return self.text if self.tts_text is None else self.tts_text
+
     @classmethod
     def from_db(cls, value: dict[str, Any]) -> "NovelBlock":
         return cls(

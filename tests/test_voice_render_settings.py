@@ -38,3 +38,21 @@ def test_timing_rejects_values_outside_safe_range(tmp_path: Path) -> None:
     female = _touch(tmp_path / "Basic" / "Basic_female.wav")
     with pytest.raises(RuntimeError, match="between 0 and 3.0"):
         VoiceRenderSettingsStore(tmp_path).save_timing(female, VoiceRenderTiming(lead_in_seconds=3.1))
+
+
+def test_timings_for_reads_the_settings_file_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    female = _touch(tmp_path / "Basic" / "Basic_female.wav")
+    extra = _touch(tmp_path / "extra_female" / "extra_female_1.wav")
+    store = VoiceRenderSettingsStore(tmp_path)
+    expected = {store.key_for(female): VoiceRenderTiming(lead_in_seconds=0.2)}
+    calls = 0
+
+    def load_once() -> dict[str, VoiceRenderTiming]:
+        nonlocal calls
+        calls += 1
+        return expected
+
+    monkeypatch.setattr(store, "load", load_once)
+
+    assert store.timings_for([female, extra]) == [expected[store.key_for(female)], DEFAULT_TIMING]
+    assert calls == 1

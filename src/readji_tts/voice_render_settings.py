@@ -86,6 +86,11 @@ class VoiceRenderSettingsStore:
     def timing_for(self, wav_path: Path) -> VoiceRenderTiming:
         return self.load().get(self.key_for(wav_path), DEFAULT_TIMING)
 
+    def timings_for(self, wav_paths: list[Path]) -> list[VoiceRenderTiming]:
+        """Resolve many WAV timings from one settings-file read."""
+        timings = self.load()
+        return [timings.get(self.key_for(path), DEFAULT_TIMING) for path in wav_paths]
+
     def save_timing(self, wav_path: Path, timing: VoiceRenderTiming) -> None:
         key = self.key_for(wav_path)
         _validate_timing(timing, source=key)

@@ -164,7 +164,7 @@ def count_render_output_blocks(
     block_list = list(blocks)
     output_blocks = 0
     for index, block in enumerate(block_list):
-        segments = plan_tts_segments(block.tts_text or block.text, block.tts)
+        segments = plan_tts_segments(block.synthesis_text, block.tts)
         for segment in segments:
             if segment.text:
                 output_blocks += len(split_text(segment.text, max_chunk_chars))
@@ -240,7 +240,10 @@ def concatenate_to_mp3(
         raise ValueError("Episode has no audible blocks")
     output_wav = output_mp3.with_suffix(".wav")
     manifest = output_mp3.with_suffix(".concat.txt")
-    manifest.write_text("".join(f"file '{path.resolve().as_posix()}'\n" for path in wav_paths), encoding="utf-8")
+    manifest.write_text(
+        "".join(f"file '{_ffconcat_escape_path(path)}'\n" for path in wav_paths),
+        encoding="utf-8",
+    )
     try:
         subprocess.run(
             [
@@ -262,6 +265,16 @@ def concatenate_to_mp3(
     finally:
         manifest.unlink(missing_ok=True)
         output_wav.unlink(missing_ok=True)
+
+
+def _ffconcat_escape_path(path: Path) -> str:
+    """Quote an absolute path for ffmpeg's concat-demuxer script syntax.
+
+    The concat parser uses shell-like single quotes. Close the quoted token,
+    escape a literal apostrophe, then reopen it. This matters when a customer
+    installs the project below a user/folder name such as ``O'Brien``.
+    """
+    return path.resolve().as_posix().replace("'", "'\\''")
 
 
 def timestamps_from_durations(

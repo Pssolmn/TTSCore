@@ -18,7 +18,7 @@ been explicitly approved.
 ## Install
 
 ```powershell
-cd "C:\Users\SEESO\Documents\Web dev\TTSCore"
+cd "<path-to-your-clone>\TTSCore"
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -156,11 +156,18 @@ The first run downloads `openbmb/VoxCPM2`. A worker does not process any job wit
 - Each output key is unique to the episode, voice slot, profile version, job, and attempt: `episode-audio/{episode-id}/{slot}/{version}/job-{job-id}/attempt-{attempt}/full.mp3`, so an immutable CDN cache can never serve an older retry as a new revision.
 - Rendering is deliberately sequential per GPU. Run another worker only on a separate GPU-equipped machine.
 
-## Current local installation
+## Deployment handoff
 
-The local GPU machine is already configured with Python 3.11, CUDA 12.8, VoxCPM2 weights, the neutral master narrator, PostgreSQL/R2 connectivity, and a `ReadjiTtsWorker` Windows Scheduled Task. Its durable log is `runtime/worker.log`. Do not run a second copy of the worker on this same GPU.
+Treat every customer GPU machine as a clean installation. Do not copy `.venv`,
+`.env`, `runtime/`, Python bytecode, package metadata, or a developer's cached
+model directory into the delivery. Follow `SETUP.md`, create a new environment,
+and provide that deployment's own PostgreSQL/R2 values. The worker is manual by
+design: its Scheduled Task may remain absent or disabled, and queued jobs wait
+until an operator opens the desktop worker.
 
-Before a public deployment, rotate the existing development database/R2 secrets and supply those new values through a dedicated worker environment file when the worker is moved off this machine.
+Rotate development database/R2 credentials before delivery. Do not run two
+worker processes on the same GPU; the local instance lock rejects the second
+copy. Its durable local log is recreated automatically at `runtime/worker.log`.
 
 ## End-to-end smoke test
 

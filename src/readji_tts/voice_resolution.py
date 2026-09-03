@@ -16,9 +16,10 @@ fuzzy-matches a typo to a similarly named category. A missing
 ungendered category fails instead of guessing.
 
 Within a category folder, usable files are named ``<category>_<N>.wav`` where
-``N`` is a positive integer.  Files are ordered by that number, then by name
-for deterministic handling of duplicate numbers.  ``voice_index`` selects by
-that ordered position and wraps around the files that actually exist.
+``N`` is a positive integer. Files are ordered by that number. Duplicate
+numeric indices (for example ``voice_1.wav`` and ``voice_01.wav``) are rejected
+as ambiguous. ``voice_index`` selects by ordered position and wraps around the
+files that actually exist.
 """
 
 from __future__ import annotations
@@ -61,6 +62,11 @@ def resolve_voice_reference(
         return _require_default_narrator(voices_root)
     if voice_index is None:
         raise RuntimeError(f"Voice assignment for category {category!r} has no voice_index")
+    if isinstance(voice_index, bool) or not isinstance(voice_index, int):
+        raise RuntimeError(
+            f"Voice assignment for category {category!r} has invalid voice_index {voice_index!r}; "
+            "expected a positive integer"
+        )
     if voice_index < 1:
         raise RuntimeError(f"Voice assignment for category {category!r} has invalid voice_index {voice_index}")
 
@@ -131,6 +137,7 @@ def _gender_from_category(category: str) -> str | None:
 
 def _select_variant(folder: Path, voice_index: int, *, attempted: tuple[str, ...]) -> Path:
     variants: list[tuple[int, str, Path]] = []
+    filenames_by_index: dict[int, str] = {}
     expected_category = folder.name.casefold()
     for candidate in folder.iterdir():
         if not candidate.is_file() or candidate.suffix.casefold() != ".wav":
@@ -140,6 +147,13 @@ def _select_variant(folder: Path, voice_index: int, *, attempted: tuple[str, ...
             continue
         numeric_index = int(parsed.group(2))
         if numeric_index >= 1:
+            previous = filenames_by_index.get(numeric_index)
+            if previous is not None:
+                raise RuntimeError(
+                    f"Voice category folder {folder} has duplicate numeric index {numeric_index}: "
+                    f"{previous!r} and {candidate.name!r}"
+                )
+            filenames_by_index[numeric_index] = candidate.name
             variants.append((numeric_index, candidate.name.casefold(), candidate))
 
     if not variants:

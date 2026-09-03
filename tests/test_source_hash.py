@@ -10,6 +10,7 @@ from readji_tts.audio import (
     SCENE_BREAK_PAUSE_SECONDS,
     concatenate_to_mp3,
     count_render_output_blocks,
+    _ffconcat_escape_path,
     plan_tts_segments,
     sanitize_tts_text,
     should_add_inter_block_silence,
@@ -137,9 +138,24 @@ def test_output_block_preflight_counts_configured_inter_block_silence() -> None:
     assert count_render_output_blocks(blocks, 80, inter_block_silence_seconds=0.12) == 3
 
 
+def test_explicit_empty_tts_text_does_not_fall_back_to_reader_text() -> None:
+    block = NovelBlock(id="one", label="paragraph", text="ข้อความที่ผู้อ่านเห็น", style=None, tts_text="")
+
+    assert block.synthesis_text == ""
+    assert count_render_output_blocks([block], 80) == 0
+
+
+def test_ffconcat_path_escapes_apostrophes(tmp_path: Path) -> None:
+    path = tmp_path / "O'Brien" / "voice.wav"
+
+    escaped = _ffconcat_escape_path(path)
+
+    assert "O'\\''Brien" in escaped
+
+
 def test_concatenate_to_mp3_preserves_pcm_duration(tmp_path: Path) -> None:
-    ffmpeg = shutil.which("ffmpeg") or "C:/ytdl/ffmpeg.exe"
-    if not Path(ffmpeg).is_file():
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
         pytest.skip("ffmpeg is unavailable on this machine")
     first = tmp_path / "first.wav"
     second = tmp_path / "second.wav"
@@ -158,6 +174,22 @@ def test_concatenate_to_mp3_preserves_pcm_duration(tmp_path: Path) -> None:
     info = sf.info(output)
     assert info.samplerate == 32_000
     assert info.channels == 1
+
+
+def test_concatenate_to_mp3_supports_apostrophe_in_install_path(tmp_path: Path) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg is unavailable on this machine")
+    folder = tmp_path / "customer's worker"
+    folder.mkdir()
+    source = folder / "voice.wav"
+    sf.write(source, np.zeros(2_400, dtype=np.float32), 48_000, subtype="PCM_16")
+    output = folder / "episode.mp3"
+
+    duration = concatenate_to_mp3([source], output, ffmpeg_path=ffmpeg)
+
+    assert output.is_file()
+    assert duration == pytest.approx(0.05, abs=0.001)
 
 
 def test_write_silence_wav_has_requested_duration(tmp_path: Path) -> None:

@@ -1,8 +1,10 @@
-.venv
+.venv/
 .env
 .env.*
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
 desktop.ini
-runtime/r2-upload-quota.json
-runtime/r2-upload-quota.json.lock
+runtime/

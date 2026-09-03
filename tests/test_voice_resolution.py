@@ -113,6 +113,26 @@ def test_resolve_voice_reference_requires_complete_non_narrator_assignment(tmp_p
         resolve_voice_reference(tmp_path, voice_category=None, voice_index=1)
 
 
+@pytest.mark.parametrize("invalid_index", [True, False, 1.5, "1"])
+def test_resolve_voice_reference_rejects_non_integer_indices(tmp_path: Path, invalid_index: object) -> None:
+    _variant(tmp_path, "handsome_male", 1)
+
+    with pytest.raises(RuntimeError, match="positive integer"):
+        resolve_voice_reference(
+            tmp_path,
+            voice_category="handsome_male",
+            voice_index=invalid_index,  # type: ignore[arg-type]
+        )
+
+
+def test_resolve_voice_reference_rejects_duplicate_numeric_indices(tmp_path: Path) -> None:
+    _variant(tmp_path, "handsome_male", 1)
+    _touch(tmp_path / "handsome_male" / "handsome_male_01.wav")
+
+    with pytest.raises(RuntimeError, match="duplicate numeric index 1"):
+        resolve_voice_reference(tmp_path, voice_category="handsome_male", voice_index=1)
+
+
 def test_resolve_voice_reference_allows_a_basic_override_with_wraparound(tmp_path: Path) -> None:
     old_male = tmp_path / "Basic" / "Basic_old_male.wav"
     young_male = tmp_path / "Basic" / "Basic_young_male.wav"

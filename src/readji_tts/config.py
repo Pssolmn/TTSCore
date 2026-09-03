@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import os
 import shutil
 import socket
+import os
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator
@@ -47,8 +47,8 @@ class Settings(BaseSettings):
     master_voice_path: Path = Field(default=Path("assets/master-voice/readji-narrator.wav"), alias="TTS_MASTER_VOICE_PATH")
     # Root folder for both the Basic-tier render voices (see BASIC_VOICE_FOLDER_NAME
     # subfolder, read on every render via load_basic_voice_profiles) and the
-    # dynamic per-character voice-variant scan (Settings dialog's "Variant Tray").
-    # See voice_variants.py.
+    # dynamic per-character voice scan used by Pro rendering and the Settings
+    # dialog's voice tray. See voice_resolution.py/voice_render_settings.py.
     voice_variants_path: Path = Field(default=Path("assets/voices"), alias="TTS_VOICE_VARIANTS_PATH")
     model_id: str = Field(default="openbmb/VoxCPM2", alias="TTS_MODEL_ID")
     device: str = Field(default="cuda", alias="TTS_DEVICE")
@@ -168,8 +168,6 @@ def load_settings(*, require_master_voice: bool = False) -> Settings:
     candidates = [
         configured_ffmpeg if configured_ffmpeg.is_file() else None,
         Path(shutil.which(settings.ffmpeg_path)) if shutil.which(settings.ffmpeg_path) else None,
-        # Current local setup fallback; deployments must use PATH or TTS_FFMPEG_PATH.
-        Path("C:/ytdl/ffmpeg.exe") if os.name == "nt" else None,
     ]
     resolved_ffmpeg = next((candidate for candidate in candidates if candidate and candidate.is_file()), None)
     if resolved_ffmpeg is None:
